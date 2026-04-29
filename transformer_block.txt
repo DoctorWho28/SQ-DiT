@@ -1,0 +1,37 @@
+BasicTransformerBlock(
+    (norm1): AdaLayerNormZero(
+        (emb): CombinedTimestepLabelEmbeddings(
+            (time_proj): Timesteps()
+            (timestep_embedder): TimestepEmbedding(
+                (linear_1): Linear(in_features=256, out_features=1152, bias=True)
+                (act): SiLU()
+                (linear_2): Linear(in_features=1152, out_features=1152, bias=True)
+            )
+            (class_embedder): LabelEmbedding(
+                (embedding_table): Embedding(1001, 1152)
+            )
+        )
+        (silu): SiLU()
+        (linear): Linear(in_features=1152, out_features=6912, bias=True)
+        (norm): LayerNorm((1152,), eps=1e-06, elementwise_affine=False)
+    )
+    (attn1): Attention(
+        (to_q): Linear(in_features=1152, out_features=1152, bias=True)
+        (to_k): Linear(in_features=1152, out_features=1152, bias=True)
+        (to_v): Linear(in_features=1152, out_features=1152, bias=True)
+        (to_out): ModuleList(
+            (0): Linear(in_features=1152, out_features=1152, bias=True)
+            (1): Dropout(p=0.0, inplace=False)
+        )
+    )
+    (norm3): LayerNorm((1152,), eps=1e-05, elementwise_affine=False)
+    (ff): FeedForward(
+        (net): ModuleList(
+            (0): GELU(
+                (proj): Linear(in_features=1152, out_features=4608, bias=True)
+            )
+            (1): Dropout(p=0.0, inplace=False)
+            (2): Linear(in_features=4608, out_features=1152, bias=True)
+        )
+    )
+)
