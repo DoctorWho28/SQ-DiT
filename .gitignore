@@ -3,3 +3,4 @@ dit_env
 *.png
 *.json
 createSeeds.py
+output
