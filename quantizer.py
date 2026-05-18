@@ -31,7 +31,7 @@ if __name__== "__main__":
     timesteps = calculate_buckets(pipe)
     '''
     # Temporaneo
-    timesteps = torch.arange(0, 1001, 40, device=device)
+    timesteps = torch.arange(1000, 0, -40, device=device)
     timesteps = [t.unsqueeze(0) for t in timesteps]
 
     '''

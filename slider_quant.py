@@ -1,3 +1,6 @@
+from asyncio.windows_utils import pipe
+import json
+
 import torch
 import torch.nn as nn
 from diffusers import DiTPipeline
@@ -91,23 +94,29 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
     '''
     Calculate the output of the original model
     '''
-
     latents_copy = latents.clone().detach()
+    hidden_states = pipe.transformer.pos_embed(latents_copy)
     original_outputs = {}
     with torch.no_grad():
         for c in class_id:
+            c_value = c.item()
+            original_outputs[str(c_value)] = {}
             for t in timesteps:
                 t_value = t.item()
+                original_outputs[str(c_value)][str(t_value)] = {}
+                latents_copy = hidden_states.clone().detach()
                 for id,layer in enumerate(pipe.transformer.transformer_blocks):
-                    latents_copy = layer(latents_copy, timestep=t, class_labels=c).sample.clone()
+                    latents_copy = layer(latents_copy, timestep=t, class_labels=c).clone().detach()
+                    print(f"{latents_copy.clone().detach().tolist()[0][0][0]} timestep: {t_value}, class: {c_value}, layer: {id} - Original output calculated")
 
                     # Write the output of the original model
-                    if str(t_value) not in original_outputs:
-                        original_outputs[str(t_value)] = {}
-                    original_outputs[str(t_value)][str(id)] = latents_copy.clone().detach()
+                    original_outputs[str(c_value)][str(t_value)][str(id)] = latents_copy.clone().detach().tolist()
+                #print(f"{original_outputs[str(c_value)][str(t_value)][str(id)][0][0][0]} - Original output calculated for class: {c_value}, timestep: {t_value}, layer: {id}") 
+                if torch.isnan(torch.tensor(original_outputs[str(c_value)][str(t_value)][str(id)])).any():
+                    print(f"NaN detected in original outputs for class {c_value} and timestep {t_value} at layer {id}")
+                    break
             
-            # Reset latents after each class image
-            latents_copy = latents.clone().detach()
+            
     return original_outputs
 
 
@@ -129,7 +138,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     '''
 
 
-    latents = torch.randn((1, 4, 64, 64), device=device, dtype=torch.float16)
+    latents = torch.randn((1, 4, 32, 32), device=device, dtype=torch.float16)
     class_steps = int(1000/class_num)
     class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)]
 
@@ -137,15 +146,19 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     '''If already exists a json with the parameters, 
     load the original outputs and skip this function'''
     original_outputs = calc_original_outputs(pipe,timesteps,class_id,latents)
+    with open("output/original_output.json", "w") as f:
+        json.dump(original_outputs, f, indent=4)
     # Write the original outputs on a json file
     completed_epoch = 0
-
+    exit()
     # Calculate the windows for the algorithm
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
 
     latents_copy = latents.clone().detach()
-
-    for window in window_list:
+    quantized_output = {}
+    
+    for window_id, window in enumerate(window_list):
+        quantized_output[window_id] = {}
         linear_modules = []
         original_weights_backup = []
         
@@ -154,39 +167,44 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                 if isinstance(module, nn.Linear):
                     linear_modules.append(module)
                     original_weights_backup.append(module.weight.data.clone().detach())
-        
+        print(f"Window: {window}, {window_id} number of linear modules: {len(linear_modules)}")
         for g in [gamma, 1.0]:       
             quantized_tensors = sliding_quantize_tensors(original_weights_backup, bits=bits, gamma=g)
             
             for module, q_tensor in zip(linear_modules, quantized_tensors):
                 module.weight.data.copy_(q_tensor)
             
-            for epoch in range(completed_epoch,epoch_num):
-                quantized_output = {}
+            for current_epoch in range(completed_epoch,epoch_num+1):            
                 for c in class_id:
-                    for t in timesteps:
+                    c_value = c.item()
+                    quantized_output[window_id][str(c_value)] = {}
+                    for t_id, t in enumerate(timesteps):
                         t_value = t.item()
-                        for layer_id, in window:
+                        quantized_output[window_id][str(c_value)][str(t_value)] = {}
+                        if window[0] > 0:
+                            latents_copy = torch.tensor(quantized_output[window_id-1][str(c_value)][str(t_value)][str(window[0]-1)], device=device, dtype=torch.float16)
+                        elif t_id > 0:
+                            latents_copy = torch.tensor(original_outputs[str(c_value)][str(timesteps[t_id-1].item())][str(window_list[-1][-1])].clone().detach(), device=device, dtype=torch.float16)
+                        else:
+                            latents_copy = latents.clone().detach()
+                        for layer_id in window:
                             layer = pipe.transformer.transformer_blocks[layer_id]
-                            latents_copy = layer(latents_copy, timestep=t, class_labels=c).sample.clone()
-
+                            latents_copy = layer(latents_copy, timestep=t, class_labels=c).clone().detach()
+                            print(f"Window: {window}, Epoch: {current_epoch+1}/{epoch_num}, Timestep: {t_value}, Class: {c.item()}")
                             # Write the output of the quantized model
-                            if window not in quantized_output:
-                                quantized_output[window] = {}
-                            if str(t_value) not in quantized_output[window]:
-                                quantized_output[window][str(t_value)] = {}
-                            quantized_output[window][str(t_value)][str(id)] = latents_copy.copy()
-                
-                    # Reset latents after each class image
-                    latents_copy = latents.clone().detach()
-
-                # Optimizer
+                            quantized_output[window_id][str(c_value)][str(t_value)][str(layer_id)] = latents_copy.clone().detach().tolist()
+                            print(f"Window: {window_id}, Epoch: {current_epoch+1}/{epoch_num}, Timestep: {t_value}, layer_id: {layer_id}, Class: {c.item()} - Output saved")
+                    with open("output/quantized_output.json", "w") as f:
+                        json.dump(quantized_output, f, indent=4)
+                if current_epoch < epoch_num:
+                    pass
+                    # Optimizer
 
                 # Save in the json the optimized weight and epoch completed
 
         # Reset weight after window finished
         for module, orig_tensor in zip(linear_modules, original_weights_backup):
-            module.weight._copy(orig_tensor)
+            module.weight.data.copy_(orig_tensor)
     
 
     return pipe
