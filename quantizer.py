@@ -1,11 +1,13 @@
 import argparse
 import torch
 from diffusers import DiTPipeline
+from slider_quant import apply_sliderquant
 
 if __name__== "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--model", type=str, default="facebook/DiT-XL-2-256", help="Model name (default: facebook/DiT-XL-2-256)")
     
+    # Remove epoch and class_num and use a yaml for parameters of running
     parser.add_argument("-e", "--epoch", type=int, default=1, help="Epoch number (default: 1)")
     parser.add_argument("-nc", "--class_n", type=int, default=1, help="Class number (default: 1)")
     parser.add_argument("-b", "--bits", type=int, default=4, help="Bits of quantization (default: 4)")
@@ -14,6 +16,7 @@ if __name__== "__main__":
     model_id = args.model
     epoch_num = args.epoch
     class_num = args.class_n
+    bits = args.bits
 
     print(f"Model: {args.model}")
     print(f"Epochs: {args.epoch}")
@@ -36,17 +39,15 @@ if __name__== "__main__":
     layer_shallow, layer_int, layer_deep = divide_layer(pipe,timesteps)
     '''
     # Temporaneo
-    LAYER_SHALLOW, LAYER_INT, LAYER_DEEP = 4, 20, 4
+    layer_shallow, layer_int, layer_deep = 4, 20, 4
     
     # Possibili input in cmd
-    WINDOW_SIZE = 2
-    WINDOW_STEP = 1
-    GAMMA = 0.5
+    window_size = 2
+    window_step = 1
+    gamma = 0.5
 
-    '''
-    Apply SliderQuant (modifies the pipe):
+    # Apply SliderQuant (modifies the pipe)
     pipe = apply_sliderquant(pipe,device,timesteps,layer_shallow,layer_int,layer_deep,window_size,window_step,gamma,epoch_num,class_num,bits)
-    '''
 
 
 
