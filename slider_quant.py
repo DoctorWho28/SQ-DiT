@@ -1,29 +1,46 @@
 import torch
 import torch.nn as nn
 
-'''Totalmente da risistemare per far si che dia in output la lista di tensori quantizzati'''
-def quantize_tensors(tensor_list, bits=4, gamma=1):
-    # Idempotent function that quantize a list of tensor
-    zmin = tensor_list.min()
-    zmax = tensor_list.max()
-    qmax = 2**bits - 1
-    alpha = (zmax-zmin)/qmax
-    beta = torch.round(zmin/alpha)
+import torch
 
-    quantized_list = [torch.round(tensor / alpha) - beta for tensor in tensor_list]
-    quantized_list = [quantized.clamp(0, qmax) for quantized in quantized_list]
-    dequantized_list = [(quantized + beta) * alpha for quantized in quantized_list]
+def sliding_quantize_tensors(tensor_list, bits=4, gamma=1.0):
+    result_list = []
+    qmax = (2 ** bits) - 1
 
-    
-    '''if gamma < 1.0:
-        for i, dequantized in enumerate(dequantized_list):
-            num_rows = dequantized.size(0)
-            limit_row = int(num_rows * gamma)
-            new_weight = tensor_list[i].clone()
-            new_weight[:limit_row, :] = dequantized[:limit_row, :]
-            module_list[i].weight.copy_(new_weight)
-    else:
-        module.weight.copy_(quantized_weight)'''
+    for original_tensor in tensor_list:
+        num_rows = original_tensor.size(0)
+        
+        if gamma > 1:
+            gamma = 1.0
+        
+        limit_row = int(num_rows * gamma)
+
+        if limit_row == 0:
+            result_list.append(original_tensor.clone())
+            continue
+
+        target_slice = original_tensor[:limit_row, ...]
+
+        zmin = target_slice.min()
+        zmax = target_slice.max()
+
+        if zmax == zmin:
+            result_list.append(original_tensor.clone())
+            continue
+
+        alpha = (zmax - zmin) / qmax
+        beta = torch.round(zmin / alpha)
+
+        quantized_slice = torch.round(target_slice / alpha) - beta
+        quantized_slice = quantized_slice.clamp(0, qmax)
+        dequantized_slice = (quantized_slice + beta) * alpha
+
+        mixed_tensor = original_tensor.clone()
+        mixed_tensor[:limit_row, ...] = dequantized_slice
+        
+        result_list.append(mixed_tensor)
+
+    return result_list
 
 
 
@@ -92,16 +109,22 @@ def apply_sliderquant(pipe,device,timesteps,layer_shallow,layer_int,layer_deep,w
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
 
     latents_copy = latents.copy()
+
     for window in window_list:
-        # Quantize all layer in the window
-        for g in [gamma,1]:
-            # Mettere liste per salvare i pesi originali per poterli resettare dopo
-            tensors_to_quantize = []
-            for layer_id, in window:
-                for _, module in pipe.transformer.transformer_blocks[layer_id].named_modules():
-                    if isinstance(module, nn.Linear):
-                        tensors_to_quantize.append(module.weight.copy())
-            quantize_tensors(tensors_to_quantize, bits=bits, gamma=g)
+        linear_modules = []
+        original_weights_backup = []
+        
+        for layer_id in window:
+            for _, module in pipe.transformer.transformer_blocks[layer_id].named_modules():
+                if isinstance(module, nn.Linear):
+                    linear_modules.append(module)
+                    original_weights_backup.append(module.weight.data.clone().detach())
+        
+        for g in [gamma, 1.0]:       
+            quantized_tensors = sliding_quantize_tensors(original_weights_backup, bits=bits, gamma=g)
+            
+            for module, q_tensor in zip(linear_modules, quantized_tensors):
+                module.weight.data.copy_(q_tensor)
             
             for epoch in range(completed_epoch,epoch_num):
                 quantized_output = {}
