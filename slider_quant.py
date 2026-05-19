@@ -1,9 +1,10 @@
 from asyncio.windows_utils import pipe
 import json
-
+import os
 import torch
 import torch.nn as nn
 from diffusers import DiTPipeline
+from safetensors.torch import save_file, load_file
 
 def sliding_quantize_tensors(tensor_list: list[torch.Tensor], bits: int=4, gamma: float=1.0) -> list[torch.Tensor]:
     '''
@@ -89,34 +90,28 @@ def calculate_window_index(layer_shallow: int, layer_int: int, layer_deep: int, 
 
     return window_list
 
-
-def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_id: list[torch.Tensor],latents: torch.Tensor) -> torch.Tensor:
+def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_id: list[torch.Tensor],latents: torch.Tensor) -> dict[ str, dict[str, dict[str, torch.Tensor]]]:
     '''
-    Calculate the output of the original model
+    Calculate the output of the original model and return it in a flat dictionary, where the key is a string that contains the class, timestep and layer id, and the value is the output of the model for that class, timestep and layer.
     '''
     latents_copy = latents.clone().detach()
     hidden_states = pipe.transformer.pos_embed(latents_copy)
-    original_outputs = {}
+
+    original_outputs = {} 
+    
     with torch.no_grad():
         for c in class_id:
             c_value = c.item()
-            original_outputs[str(c_value)] = {}
             for t in timesteps:
                 t_value = t.item()
-                original_outputs[str(c_value)][str(t_value)] = {}
                 latents_copy = hidden_states.clone().detach()
-                for id,layer in enumerate(pipe.transformer.transformer_blocks):
+                
+                for layer_id, layer in enumerate(pipe.transformer.transformer_blocks):
                     latents_copy = layer(latents_copy, timestep=t, class_labels=c).clone().detach()
-                    print(f"{latents_copy.clone().detach().tolist()[0][0][0]} timestep: {t_value}, class: {c_value}, layer: {id} - Original output calculated")
 
-                    # Write the output of the original model
-                    original_outputs[str(c_value)][str(t_value)][str(id)] = latents_copy.clone().detach().tolist()
-                #print(f"{original_outputs[str(c_value)][str(t_value)][str(id)][0][0][0]} - Original output calculated for class: {c_value}, timestep: {t_value}, layer: {id}") 
-                if torch.isnan(torch.tensor(original_outputs[str(c_value)][str(t_value)][str(id)])).any():
-                    print(f"NaN detected in original outputs for class {c_value} and timestep {t_value} at layer {id}")
-                    break
-            
-            
+                    key = f"class_{c_value}_time_{t_value}_layer_{layer_id}"
+                    original_outputs[key] = latents_copy.clone().detach()
+                    
     return original_outputs
 
 
@@ -142,60 +137,66 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     class_steps = int(1000/class_num)
     class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)]
 
-
     '''If already exists a json with the parameters, 
     load the original outputs and skip this function'''
-    original_outputs = calc_original_outputs(pipe,timesteps,class_id,latents)
-    with open("output/original_output.json", "w") as f:
-        json.dump(original_outputs, f, indent=4)
-    # Write the original outputs on a json file
+    
+    checkpoint_dir = "temp_quant_data"
+    
+    if os.path.exists("temp_quant_data/original_outputs.safetensors"):
+        print("Loading original outputs from file...")
+        original_outputs = load_file(f"{checkpoint_dir}/original_outputs.safetensors", device=device)
+    else:
+        original_outputs = calc_original_outputs(pipe, timesteps, class_id, latents)
+
+        # save of original outputs in a safetensors file
+        save_file(original_outputs, f"{checkpoint_dir}/original_outputs.safetensors")
+    
     completed_epoch = 0
-    exit()
+    
     # Calculate the windows for the algorithm
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
 
     latents_copy = latents.clone().detach()
+    hidden_states = pipe.transformer.pos_embed(latents_copy)
     quantized_output = {}
-    
     for window_id, window in enumerate(window_list):
-        quantized_output[window_id] = {}
         linear_modules = []
-        original_weights_backup = []
+        original_weights = []
         
         for layer_id in window:
             for _, module in pipe.transformer.transformer_blocks[layer_id].named_modules():
                 if isinstance(module, nn.Linear):
                     linear_modules.append(module)
-                    original_weights_backup.append(module.weight.data.clone().detach())
+                    original_weights.append(module.weight.data.clone().detach())
+        
         print(f"Window: {window}, {window_id} number of linear modules: {len(linear_modules)}")
         for g in [gamma, 1.0]:       
-            quantized_tensors = sliding_quantize_tensors(original_weights_backup, bits=bits, gamma=g)
+            quantized_tensors = sliding_quantize_tensors(original_weights, bits=bits, gamma=g)
             
             for module, q_tensor in zip(linear_modules, quantized_tensors):
                 module.weight.data.copy_(q_tensor)
             
-            for current_epoch in range(completed_epoch,epoch_num+1):            
+            for current_epoch in range(completed_epoch, epoch_num+1):    
                 for c in class_id:
                     c_value = c.item()
-                    quantized_output[window_id][str(c_value)] = {}
                     for t_id, t in enumerate(timesteps):
                         t_value = t.item()
-                        quantized_output[window_id][str(c_value)][str(t_value)] = {}
                         if window[0] > 0:
-                            latents_copy = torch.tensor(quantized_output[window_id-1][str(c_value)][str(t_value)][str(window[0]-1)], device=device, dtype=torch.float16)
+                            latents_copy = quantized_output[f"window_{window_id-1}_class_{c_value}_time_{t_value}_layer_{str(window[0]-1)}"]
                         elif t_id > 0:
-                            latents_copy = torch.tensor(original_outputs[str(c_value)][str(timesteps[t_id-1].item())][str(window_list[-1][-1])].clone().detach(), device=device, dtype=torch.float16)
+                            latents_copy = original_outputs[f"class_{c_value}_time_{timesteps[t_id-1].item()}_layer_{window_list[-1][-1]}"]
                         else:
-                            latents_copy = latents.clone().detach()
+                            latents_copy = hidden_states.clone().detach()
                         for layer_id in window:
                             layer = pipe.transformer.transformer_blocks[layer_id]
                             latents_copy = layer(latents_copy, timestep=t, class_labels=c).clone().detach()
-                            print(f"Window: {window}, Epoch: {current_epoch+1}/{epoch_num}, Timestep: {t_value}, Class: {c.item()}")
+
                             # Write the output of the quantized model
-                            quantized_output[window_id][str(c_value)][str(t_value)][str(layer_id)] = latents_copy.clone().detach().tolist()
-                            print(f"Window: {window_id}, Epoch: {current_epoch+1}/{epoch_num}, Timestep: {t_value}, layer_id: {layer_id}, Class: {c.item()} - Output saved")
-                    with open("output/quantized_output.json", "w") as f:
-                        json.dump(quantized_output, f, indent=4)
+                            key = f"window_{window_id}_class_{c_value}_time_{t_value}_layer_{layer_id}"
+                            quantized_output[key] = latents_copy.clone().detach()
+                    
+                    print(f"Window: {window_id}, gamma: {g}, Epoch: {current_epoch}/{epoch_num+1}, Timestep: {t_value}, layer_id: {layer_id}, Class: {c.item()} - Output saved")
+                    save_file(quantized_output, f"{checkpoint_dir}/quantized_output.safetensors")
                 if current_epoch < epoch_num:
                     pass
                     # Optimizer
@@ -203,7 +204,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                 # Save in the json the optimized weight and epoch completed
 
         # Reset weight after window finished
-        for module, orig_tensor in zip(linear_modules, original_weights_backup):
+        for module, orig_tensor in zip(linear_modules, original_weights):
             module.weight.data.copy_(orig_tensor)
     
 

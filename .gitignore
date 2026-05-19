@@ -2,5 +2,6 @@ __pycache__/*
 dit_env
 *.png
 *.json
+temp_quant_data/*
 createSeeds.py
 output
