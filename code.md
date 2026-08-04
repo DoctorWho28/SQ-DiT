@@ -31,4 +31,10 @@ TO-DO:
     -Capire perchè calc_original_outputs non funziona e al timestep 680 layer 11 restituisce nan come valori. (risolto credo)
     -Capire come salvare in modo migliore i latent originali di calc_original_outputs (prob torch.save) 
 
+La cartella temporanea è unica, quindi il resume è solo dell'ultima quantizzazione iniziata.
+
+NOI SALVIAMO I MODELLI IN QUESTO MODO NELLA CARTELLA FACEBOOK PER ESEMPIO:
+    -DiT-XL-2-256-w2a2_2
+    -DiT-XL-2-256-w2a2_3
+
 -- La parte 3 segue questa logica: mentre si traina il modello quantizzato l'input del layer 0 per ogni bucket è l'output del modello originale per il bucket precedente. La propagazione dell'errore (e la conseguente prova di correzione) viene resettata ad ogni bucket perché non sarebbe possibile quando si sta trainando il layer 0 sapere quale errore si è propagato dal layer finale nel bucket precedente.
