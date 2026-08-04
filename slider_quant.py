@@ -1,35 +1,34 @@
 from asyncio.windows_utils import pipe
 import json
 import os
+import time
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers import DiTPipeline
 from safetensors.torch import save_file, load_file
 
-def sliding_quantize_tensors(tensor_list: list[torch.Tensor], bits: int=4, gamma: float=1.0) -> list[torch.Tensor]:
+class RoundSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        return torch.round(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+
+def sliding_quantize_tensors(tensor_list: list[torch.Tensor], bits: int=4) -> list[torch.Tensor]:
     '''
     Apply the quantization of a group of tensors all together, given as parameters:
     - tensor_list: the list of tensor to quantize
     - bits: number of bits to quantize to
-    - gamma: portion of each tensor to quantize
     '''
 
     result_list = []
     qmax = (2 ** bits) - 1
 
     for original_tensor in tensor_list:
-        num_rows = original_tensor.size(0)
-        
-        if gamma > 1:
-            gamma = 1.0
-        
-        limit_row = int(num_rows * gamma)
-
-        if limit_row == 0:
-            result_list.append(original_tensor.clone())
-            continue
-
-        target_slice = original_tensor[:limit_row, ...]
+        target_slice = original_tensor
 
         zmin = target_slice.min()
         zmax = target_slice.max()
@@ -41,14 +40,11 @@ def sliding_quantize_tensors(tensor_list: list[torch.Tensor], bits: int=4, gamma
         alpha = (zmax - zmin) / qmax
         beta = torch.round(zmin / alpha)
 
-        quantized_slice = torch.round(target_slice / alpha) - beta
+        quantized_slice = RoundSTE.apply(target_slice / alpha) - beta
         quantized_slice = quantized_slice.clamp(0, qmax)
         dequantized_slice = (quantized_slice + beta) * alpha
-
-        mixed_tensor = original_tensor.clone()
-        mixed_tensor[:limit_row, ...] = dequantized_slice
         
-        result_list.append(mixed_tensor)
+        result_list.append(dequantized_slice)
 
     return result_list
 
@@ -114,8 +110,83 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
                     
     return original_outputs
 
+class SliderQuantLinear(nn.Module):
+    """
+    Wrapper per nn.Linear che implementa SliderQuant (Eq 2 del paper).
+    Introduce Channel Scaling (alpha) e LoRA (A, B) come parametri apprendibili.
+    """
+    def __init__(self, original_linear: nn.Linear, bits: int, rank: int, gamma: float=1.0):
+        super().__init__()
+        self.in_features = original_linear.in_features
+        self.out_features = original_linear.out_features
+        self.bits = bits
+        self.rank = rank
+        self.gamma = gamma
+        
+        # Pesi originali (congelati)
+        self.weight = nn.Parameter(original_linear.weight.data.clone(), requires_grad=False)
+        if original_linear.bias is not None:
+            self.bias = nn.Parameter(original_linear.bias.data.clone(), requires_grad=False)
+        else:
+            self.bias = None
+        
+        orig_device = original_linear.weight.device
+        
+        # Inizializziamo i parametri in float32 per prevenire overflow dei gradienti!
+        self.alpha = nn.Parameter(torch.ones(self.in_features, dtype=torch.float32, device=orig_device))
+        self.A = nn.Parameter(torch.zeros(self.out_features, self.rank, dtype=torch.float32, device=orig_device))
+        self.B = nn.Parameter(torch.zeros(self.rank, self.in_features, dtype=torch.float32, device=orig_device))
+        nn.init.normal_(self.A, std=0.01)
 
-def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor],layer_shallow: int,layer_int: int,layer_deep: int,window_size: int,window_step: int,gamma: float,epoch_num: int,class_num: int,bits: int) -> DiTPipeline:
+    def forward(self, x):
+        orig_dtype = x.dtype
+        # Cast input e pesi a float32 per la stabilità del backward pass
+        x_f32 = x.float()
+        w_f32 = self.weight.float()
+        
+        # 1. Scala gli input in modo sicuro
+        # Limitiamo alpha per evitare divisioni per zero o amplificazioni estreme del contributo LoRA
+        safe_alpha = torch.clamp(self.alpha, min=0.1, max=10.0)
+        x_scaled = x_f32 / safe_alpha
+        
+        # 2. Modifica i pesi
+        w_adjusted = w_f32 * safe_alpha.view(1, -1) + torch.matmul(self.A, self.B)
+        
+        # Applica quantizzazione parziale in base a gamma
+        limit_row = int(self.out_features * self.gamma)
+        
+        if limit_row > 0:
+            w_quant_part = sliding_quantize_tensors([w_adjusted[:limit_row, :]], self.bits)[0]
+            if limit_row < self.out_features:
+                w_final = torch.cat([w_quant_part, w_adjusted[limit_row:, :]], dim=0)
+            else:
+                w_final = w_quant_part
+        else:
+            w_final = w_adjusted
+
+        # Esegui l'operazione lineare con i pesi quantizzati in float32
+        bias_f32 = self.bias.float() if self.bias is not None else None
+        out = F.linear(x_scaled, w_final, bias_f32)
+        return out.to(orig_dtype)
+    
+def replace_linears_with_sliderquant(module, bits=4, rank=4, gamma=1.0):
+    """
+    Sostituisce ricorsivamente tutti i layer nn.Linear di un modulo 
+    con i nostri SliderQuantLinear. Ritorna la lista dei nuovi moduli.
+    """
+    replaced_modules = []
+    for name, child in module.named_children():
+        if isinstance(child, nn.Linear):
+            sq_linear = SliderQuantLinear(child, bits=bits, rank=rank, gamma=gamma)
+            setattr(module, name, sq_linear)
+            replaced_modules.append(sq_linear)
+        elif isinstance(child, SliderQuantLinear):
+            replaced_modules.append(child)
+        else:
+            replaced_modules.extend(replace_linears_with_sliderquant(child, bits, rank, gamma))
+    return replaced_modules
+
+def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor],layer_shallow: int,layer_int: int,layer_deep: int,window_size: int,window_step: int,gamma: float,epoch_num: int,class_num: int,bits: int, rank: int) -> DiTPipeline:
     '''
     Given a module apply the SliderQuant quantization, given the parameters:
     - pipe: pipeline of the model
@@ -130,6 +201,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     - epoch_num: number of epochs for each optimization step
     - class_num: number of class to generate images when optimizing
     - bits: number of bits to quantize to
+    - rank: rank of the low-rank approximation
     '''
 
 
@@ -140,73 +212,119 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     '''If already exists a json with the parameters, 
     load the original outputs and skip this function'''
     
-    checkpoint_dir = "temp_quant_data"
-    
-    if os.path.exists("temp_quant_data/original_outputs.safetensors"):
-        print("Loading original outputs from file...")
-        original_outputs = load_file(f"{checkpoint_dir}/original_outputs.safetensors", device=device)
-    else:
-        original_outputs = calc_original_outputs(pipe, timesteps, class_id, latents)
 
-        # save of original outputs in a safetensors file
-        save_file(original_outputs, f"{checkpoint_dir}/original_outputs.safetensors")
-    
-    completed_epoch = 0
+    original_outputs = calc_original_outputs(pipe, timesteps, class_id, latents)
     
     # Calculate the windows for the algorithm
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
 
     latents_copy = latents.clone().detach()
     hidden_states = pipe.transformer.pos_embed(latents_copy)
-    quantized_output = {}
+    
+    total_start_time = time.time()
+    
     for window_id, window in enumerate(window_list):
+        window_start_time = time.time()
         linear_modules = []
-        original_weights = []
+        #original_weights = []
         
+        opt_parameters = []
+
         for layer_id in window:
-            for _, module in pipe.transformer.transformer_blocks[layer_id].named_modules():
-                if isinstance(module, nn.Linear):
-                    linear_modules.append(module)
-                    original_weights.append(module.weight.data.clone().detach())
-        
-        print(f"Window: {window}, {window_id} number of linear modules: {len(linear_modules)}")
-        for g in [gamma, 1.0]:       
-            quantized_tensors = sliding_quantize_tensors(original_weights, bits=bits, gamma=g)
+            layer_module = pipe.transformer.transformer_blocks[layer_id]
             
-            for module, q_tensor in zip(linear_modules, quantized_tensors):
-                module.weight.data.copy_(q_tensor)
+            # Cast dell'intero blocco a float32 per stabilità numerica nel backward pass
+            layer_module.float()
             
-            for current_epoch in range(completed_epoch, epoch_num+1):    
+            # Inizializziamo con il primo gamma della lista
+            linear_modules += replace_linears_with_sliderquant(layer_module, bits=bits, rank=rank, gamma=gamma)
+
+        for sq_mod in linear_modules:
+            if isinstance(sq_mod, SliderQuantLinear):
+                #original_weights.append(sq_mod.weight.data.clone().detach())
+                opt_parameters.extend([sq_mod.alpha, sq_mod.A, sq_mod.B])
+
+        optimizer = torch.optim.Adam(opt_parameters, lr=1e-4)
+        print("===================================")
+        print(f"Window {window_id}: {window},  number of linear modules: {len(linear_modules)}")
+        for g_id, g in enumerate([gamma, 1.0]):
+            
+            for sq_mod in linear_modules:
+                sq_mod.gamma = g
+            
+            print(f"--- Avvio Stage {g_id+1}/2 con gamma = {g}")
+            
+            # === PRE-CALCOLO INPUT DELLA FINESTRA ===
+            # Calcoliamo una volta sola l'input della finestra corrente per tutti i timestep.
+            # Questo elimina la necessità del dizionario gigante 'quantized_output' e risparmia tantissima RAM!
+            window_inputs_cache = {}
+            with torch.no_grad():
                 for c in class_id:
                     c_value = c.item()
                     for t_id, t in enumerate(timesteps):
                         t_value = t.item()
-                        if window[0] > 0:
-                            latents_copy = quantized_output[f"window_{window_id-1}_class_{c_value}_time_{t_value}_layer_{str(window[0]-1)}"]
-                        elif t_id > 0:
-                            latents_copy = original_outputs[f"class_{c_value}_time_{timesteps[t_id-1].item()}_layer_{window_list[-1][-1]}"]
+                        
+                        # Input base del Transformer
+                        if t_id > 0:
+                            prev_t = timesteps[t_id-1].item()
+                            base_latents = original_outputs[f"class_{c_value}_time_{prev_t}_layer_{window_list[-1][-1]}"].clone()
                         else:
-                            latents_copy = hidden_states.clone().detach()
+                            base_latents = hidden_states.clone().detach()
+                            
+                        # Propaghiamo in avanti solo fino al layer precedente alla finestra
+                        latents_copy = base_latents.float()
+                        for prev_layer_id in range(window[0]):
+                            prev_layer = pipe.transformer.transformer_blocks[prev_layer_id]
+                            t_tensor = torch.tensor([t.item()], device=device, dtype=torch.float32)
+                            latents_copy = prev_layer(latents_copy, timestep=t_tensor, class_labels=c)
+                            
+                        window_inputs_cache[f"{c_value}_{t_value}"] = latents_copy.detach().half()
+            # ========================================
+
+            for current_epoch in range(epoch_num):   
+                optimizer.zero_grad()
+                epoch_loss = 0 
+
+
+                for c in class_id:
+                    c_value = c.item()
+                    for t_id, t in enumerate(timesteps):
+                        t_value = t.item()
+                        
+                        # Prendiamo l'input pre-calcolato dalla cache
+                        latents_copy = window_inputs_cache[f"{c_value}_{t_value}"].clone().float()
+
                         for layer_id in window:
                             layer = pipe.transformer.transformer_blocks[layer_id]
-                            latents_copy = layer(latents_copy, timestep=t, class_labels=c).clone().detach()
-
-                            # Write the output of the quantized model
-                            key = f"window_{window_id}_class_{c_value}_time_{t_value}_layer_{layer_id}"
-                            quantized_output[key] = latents_copy.clone().detach()
+                            t_tensor = torch.tensor([t.item()], device=device, dtype=torch.float32)
+                            latents_copy = layer(latents_copy, timestep=t_tensor, class_labels=c)
                     
-                    print(f"Window: {window_id}, gamma: {g}, Epoch: {current_epoch}/{epoch_num+1}, Timestep: {t_value}, layer_id: {layer_id}, Class: {c.item()} - Output saved")
-                    save_file(quantized_output, f"{checkpoint_dir}/quantized_output.safetensors")
-                if current_epoch < epoch_num:
-                    pass
-                    # Optimizer
+                        last_layer = window[-1]
+                        target_key = f"class_{c_value}_time_{t_value}_layer_{last_layer}"
+                        target_output = original_outputs[target_key].to(device)
+                        
+                        loss = F.mse_loss(latents_copy.float(), target_output.float())
+                        scaled_loss = loss / len(timesteps)
+                        scaled_loss.backward()
+                        epoch_loss += loss.item()
 
-                # Save in the json the optimized weight and epoch completed
+                        
+                print(f"Window: {window_id}, Epoch: {current_epoch+1}/{epoch_num}, Loss: {epoch_loss/class_num}") 
+                
+                torch.nn.utils.clip_grad_norm_(opt_parameters, max_norm=1.0)
+                optimizer.step()
+
+        window_end_time = time.time()
+        print(f"Tempo per ottimizzare Window {window_id}: {window_end_time - window_start_time:.2f} secondi")
 
         # Reset weight after window finished
-        for module, orig_tensor in zip(linear_modules, original_weights):
-            module.weight.data.copy_(orig_tensor)
+        for layer_id in window:
+            pipe.transformer.transformer_blocks[layer_id].half()
     
+    total_end_time = time.time()
+    print(f"=====================================")
+    print(f"Tempo TOTALE ottimizzazione: {total_end_time - total_start_time:.2f} secondi")
+    print(f"=====================================")
 
     return pipe
     
