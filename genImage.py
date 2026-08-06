@@ -70,7 +70,7 @@ else:
     pipe_v3 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
     
     # Per caricare i pesi V3, dobbiamo prima ricreare la struttura W4A16 nei layer intermedi!
-    from slider_quant_v3 import W4A16Linear
+    from other_implementations.slider_quant_v3 import W4A16Linear
     # pyrefly: ignore [missing-import]
     import torch.nn as nn
     
@@ -154,7 +154,7 @@ else:
     print(f"Caricamento del modello base per V4 in corso...")
     pipe_v4 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
     
-    from slider_quant_v4 import WXA16Linear
+    from other_implementations.slider_quant_v4 import WXA16Linear
     import torch.nn as nn
     
     print("Iniezione dei layer WXA16 misti nell'architettura (8-bit Shallow/Deep, 4-bit Intermediate)...")
