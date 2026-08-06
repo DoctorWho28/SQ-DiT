@@ -38,3 +38,13 @@ NOI SALVIAMO I MODELLI IN QUESTO MODO NELLA CARTELLA FACEBOOK PER ESEMPIO:
     -DiT-XL-2-256-w2a2_3
 
 -- La parte 3 segue questa logica: mentre si traina il modello quantizzato l'input del layer 0 per ogni bucket è l'output del modello originale per il bucket precedente. La propagazione dell'errore (e la conseguente prova di correzione) viene resettata ad ogni bucket perché non sarebbe possibile quando si sta trainando il layer 0 sapere quale errore si è propagato dal layer finale nel bucket precedente.
+
+
+---------
+DA CAPIRE BENE
+
+Quantizzazione estrema su TUTTI i layer: Abbiamo applicato SliderQuant a tutti i layer lineari del Transformer (QKV, MLP, ecc.). Nel paper PTQ4DiT, dimostrano che alcuni layer sono intoccabili (devono stare a 8-bit o 16-bit) altrimenti il modello crolla (è il concetto di MRQ - Mixed Resolution Quantization del paper TQ-DiT).
+
+20 epoche hanno over fittato
+15 non testate.
+Per ora 10 epoche vanno bene.

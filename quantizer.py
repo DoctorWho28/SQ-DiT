@@ -31,7 +31,8 @@ if __name__== "__main__":
     timesteps = calculate_buckets(pipe)
     '''
     # Temporaneo
-    timesteps = torch.arange(1000, 0, -100, device=device)
+    pipe.scheduler.set_timesteps(20)
+    timesteps = pipe.scheduler.timesteps.to(device)
     timesteps = [t.unsqueeze(0) for t in timesteps]
 
     '''
@@ -45,7 +46,7 @@ if __name__== "__main__":
     window_size = 2
     window_step = 1
     gamma = 0.5
-    rank = 4
+    rank = 16
 
     # Apply SliderQuant (modifies the pipe)
     pipe = apply_sliderquant(pipe,device,timesteps,layer_shallow,layer_int,layer_deep,window_size,window_step,gamma,epoch_num,class_num,bits,rank)
