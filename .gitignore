@@ -3,6 +3,5 @@ dit_env
 *.png
 *.json
 temp_quant_data/*
-createSeeds.py
 output
 other_implementations
