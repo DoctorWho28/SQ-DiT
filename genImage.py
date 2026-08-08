@@ -4,7 +4,7 @@ import os
 
 # Impostazioni generali
 device = "cuda" if torch.cuda.is_available() else "cpu"
-class_labels = [0] # 207 = Golden Retriever
+class_labels = [19] # 207 = Golden Retriever
 inference_steps = 20 # FONDAMENTALE: usiamo gli stessi step per entrambi!
 seed = 42
 print("Inizio test comparativo...")
@@ -119,21 +119,67 @@ else:
     torch.cuda.empty_cache()
 
 # ==========================================
-# 4. GENERAZIONE CON MODELLO V1 (10 Step)
+# 4. GENERAZIONE CON MODELLO V1 (SliderQuant Attuale)
 # ==========================================
-print("\n--- TEST MODELLO V1 (Addestrato a 10 step) ---")
+print("\n--- TEST MODELLO V1 (SliderQuant Attuale) ---")
 quant_v1_dir = "output/facebook/DiT-XL-2-256"
 
 if not os.path.exists(quant_v1_dir):
     print(f"ATTENZIONE: Cartella {quant_v1_dir} non trovata.")
 else:
-    print(f"Caricamento del modello V1 {quant_v1_dir} in corso...")
-    pipe_v1 = DiTPipeline.from_pretrained(quant_v1_dir, torch_dtype=torch.float16)
+    print(f"Caricamento del modello base per V1 in corso...")
+    pipe_v1 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
+    
+    from slider_quant import WXA16Linear
+    import torch.nn as nn
+    import json
+    
+    config_path = os.path.join(quant_v1_dir, "quantization_config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            q_config = json.load(f)
+        layer_shallow = q_config.get("layer_shallow", 4)
+        layer_int = q_config.get("layer_int", 20)
+        group_size = q_config.get("group_size", 128)
+        bits_int = q_config.get("bits", 4)
+    else:
+        print("Nessun quantization_config.json trovato, uso parametri di default.")
+        layer_shallow, layer_int = 4, 20
+        group_size = 128
+        bits_int = 4
+        
+    print(f"Iniezione dei layer WXA16 misti (Shallow/Deep 8-bit, Intermediate {bits_int}-bit)...")
+    skip_names = ["norm1", "emb"]
+    
+    def inject_wXa16_v1(module, bits):
+        for name, child in module.named_children():
+            if any(skip in name for skip in skip_names):
+                continue
+            if isinstance(child, nn.Linear):
+                wX = WXA16Linear(child.in_features, child.out_features, group_size, bits=bits, bias=(child.bias is not None))
+                setattr(module, name, wX)
+            else:
+                inject_wXa16_v1(child, bits)
+                
+    # Shallow (8-bit)
+    for layer_id in range(layer_shallow):
+        inject_wXa16_v1(pipe_v1.transformer.transformer_blocks[layer_id], bits=8)
+    # Intermediate (dinamico)
+    for layer_id in range(layer_shallow, layer_shallow + layer_int):
+        inject_wXa16_v1(pipe_v1.transformer.transformer_blocks[layer_id], bits=bits_int)
+    # Deep (8-bit)
+    for layer_id in range(layer_shallow + layer_int, len(pipe_v1.transformer.transformer_blocks)):
+        inject_wXa16_v1(pipe_v1.transformer.transformer_blocks[layer_id], bits=8)
+        
+    print("Caricamento dei pesi impacchettati in uint8 da safetensors...")
+    from safetensors.torch import load_file
+    transformer_state_dict = load_file(os.path.join(quant_v1_dir, "transformer", "diffusion_pytorch_model.safetensors"))
+    pipe_v1.transformer.load_state_dict(transformer_state_dict, strict=True)
     pipe_v1 = pipe_v1.to(device)
 
     generator = torch.Generator(device=device).manual_seed(seed)
 
-    print(f"Generazione in corso (V1)...")
+    print(f"Generazione in corso (V1 WXA16)...")
     output_v1 = pipe_v1(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_v1 = output_v1.images[0]
     image_v1.save("immagine_dit_quantized_v1.png")
