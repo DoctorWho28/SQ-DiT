@@ -56,6 +56,8 @@ if __name__== "__main__":
     class_num = config.get('class_n', 1)
     bits_int = config.get('bits_int', 4)
     bits_ext = config.get('bits_ext', 8)
+    act_bits_int = config.get('act_bits_int', 4)
+    act_bits_ext = config.get('act_bits_ext', 8)
     batch_size = config.get('batch_size', 4)
     window_size = config.get('window_size', 2)
     window_step = config.get('window_step', 1)
@@ -65,6 +67,7 @@ if __name__== "__main__":
     layer_shallow = config.get('layer_shallow', 4)
     layer_int = config.get('layer_int', 20)
     layer_deep = config.get('layer_deep', 4)
+    inference_step = config.get('inference_step', 20)
 
     print(f"Model: {model_id}")
     print(f"Epochs: {epoch_num}")
@@ -73,14 +76,14 @@ if __name__== "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16, use_safetensors=False).to(device)
 
-    pipe.scheduler.set_timesteps(20)
+    pipe.scheduler.set_timesteps(inference_step)
     timesteps = pipe.scheduler.timesteps.to(device)
     timesteps = [t.unsqueeze(0) for t in timesteps]
 
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
     
     # Apply SliderQuant (modifies the pipe)
-    pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, rank, group_size, batch_size)
+    pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, act_bits_int, act_bits_ext, rank, group_size, batch_size)
 
     # Save the quantized model
     out_dir = f"output/{model_id}"

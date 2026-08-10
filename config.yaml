@@ -2,6 +2,8 @@ epoch: 10
 class_n: 1
 bits_int: 4
 bits_ext: 8
+act_bits_int: 8
+act_bits_ext: 8
 batch_size: 4
 window_size: 2
 window_step: 1
@@ -11,3 +13,4 @@ group_size: 128
 layer_shallow: 4
 layer_int: 20
 layer_deep: 4
+inference_step: 20

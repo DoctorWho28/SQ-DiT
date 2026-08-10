@@ -4,7 +4,7 @@ import os
 
 # Impostazioni generali
 device = "cuda" if torch.cuda.is_available() else "cpu"
-class_labels = [19] # 207 = Golden Retriever
+class_labels = [399] # 207 = Golden Retriever
 inference_steps = 20 # FONDAMENTALE: usiamo gli stessi step per entrambi!
 seed = 42
 print("Inizio test comparativo...")
@@ -252,4 +252,85 @@ else:
     del pipe_v4
     torch.cuda.empty_cache()
 
-print("\nConfronto completato! Apri le immagini per vedere le differenze (Originale, V1, V2, V3, V4).")
+# ==========================================
+# 6. GENERAZIONE CON MODELLO V6 (SliderQuant WXAX)
+# ==========================================
+print("\n--- TEST MODELLO V6 (SliderQuant WXAX) ---")
+quant_v6_dir = "output/facebook/DiT-XL-2-256_v6"
+
+if not os.path.exists(quant_v6_dir):
+    print(f"ATTENZIONE: Cartella {quant_v6_dir} non trovata. Hai eseguito l'ottimizzazione V6?")
+else:
+    print(f"Caricamento del modello base per V6 in corso...")
+    pipe_v6 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
+    
+    from other_implementations.slider_quant_v6 import WXAXLinear
+    import torch.nn as nn
+    import json
+    
+    config_path = os.path.join(quant_v6_dir, "quantization_config.json")
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            q_config = json.load(f)
+        layer_shallow = q_config.get("layer_shallow", 4)
+        layer_int = q_config.get("layer_int", 20)
+        group_size = q_config.get("group_size", 128)
+        bits_int = q_config.get("bits", 4)
+        bits_ext = q_config.get("bits_ext", 8)
+        act_bits_int = q_config.get("act_bits_int", 4)
+        act_bits_ext = q_config.get("act_bits_ext", 8)
+    else:
+        print("Nessun quantization_config.json trovato, uso parametri di default V6.")
+        layer_shallow, layer_int = 4, 20
+        group_size = 128
+        bits_int, bits_ext = 4, 8
+        act_bits_int, act_bits_ext = 4, 8
+        
+    print(f"Iniezione dei layer WXAX misti...")
+    skip_names = ["norm1", "emb"]
+    
+    def inject_wXax_v6(module, weight_bits, act_bits):
+        for name, child in module.named_children():
+            if any(skip in name for skip in skip_names):
+                continue
+            if isinstance(child, nn.Linear):
+                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=weight_bits, act_bits=act_bits, bias=(child.bias is not None))
+                setattr(module, name, wX)
+            else:
+                inject_wXax_v6(child, weight_bits, act_bits)
+                
+    # Shallow
+    for layer_id in range(layer_shallow):
+        inject_wXax_v6(pipe_v6.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, act_bits=act_bits_ext)
+    # Intermediate
+    for layer_id in range(layer_shallow, layer_shallow + layer_int):
+        inject_wXax_v6(pipe_v6.transformer.transformer_blocks[layer_id], weight_bits=bits_int, act_bits=act_bits_int)
+    # Deep
+    for layer_id in range(layer_shallow + layer_int, len(pipe_v6.transformer.transformer_blocks)):
+        inject_wXax_v6(pipe_v6.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, act_bits=act_bits_ext)
+        
+    print("Caricamento dei pesi impacchettati in uint8 da safetensors per V6...")
+    from safetensors.torch import load_file
+    transformer_state_dict = load_file(os.path.join(quant_v6_dir, "transformer", "diffusion_pytorch_model.safetensors"))
+    pipe_v6.transformer.load_state_dict(transformer_state_dict, strict=True)
+    pipe_v6 = pipe_v6.to(device)
+
+    generator = torch.Generator(device=device).manual_seed(seed)
+    
+    print("\n--- VERIFICA DIAGNOSTICA V6 ---")
+    test_layer_shallow = pipe_v6.transformer.transformer_blocks[0].attn1.to_q
+    test_layer_int = pipe_v6.transformer.transformer_blocks[4].attn1.to_q
+    print(f"Layer 0 (Shallow) è: {type(test_layer_shallow).__name__} (W{test_layer_shallow.weight_bits} A{test_layer_shallow.act_bits})")
+    print(f"Layer 4 (Intermediate) è: {type(test_layer_int).__name__} (W{test_layer_int.weight_bits} A{test_layer_int.act_bits})")
+    print("-------------------------------\n")
+
+    print(f"Generazione in corso (V6 WXAX)...")
+    output_v6 = pipe_v6(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    image_v6 = output_v6.images[0]
+    image_v6.save("immagine_dit_quantized_v6.png")
+    print("Immagine V6 salvata come 'immagine_dit_quantized_v6.png'")
+
+    del pipe_v6
+    torch.cuda.empty_cache()
+
+print("\nConfronto completato! Apri le immagini per vedere le differenze (Originale, V1, V2, V3, V4, V6).")

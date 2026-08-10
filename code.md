@@ -48,3 +48,20 @@ Quantizzazione estrema su TUTTI i layer: Abbiamo applicato SliderQuant a tutti i
 20 epoche hanno over fittato
 15 non testate.
 Per ora 10 epoche vanno bene.
+
+
+È un'osservazione fantastica e ci fa capire quanto sia delicato l'addestramento di questi modelli!
+
+Se sei passato da 500.000 a 1.5 (un miglioramento mostruoso) ci sono due fenomeni importantissimi che stanno avvenendo contemporaneamente:
+
+Il collasso delle feature (Il miracolo di class_n=3): Quando allenavi su class_n=1 (es. solo l'etichetta del Golden Retriever), il primissimo blocco di layer (Window 0) si "sovra-adattava" in modo estremo (overfitting) per correggere gli errori SOLO per quel cane. Facendo così, però, "storceva" completamente lo spazio matematico dei tensori in uscita. Quando questi tensori distorti arrivavano alla Window 6, i pesi originali FP32 non li riconoscevano più (si aspettavano tensori generalizzati) e generavano output totalmente diversi! Ecco perché la loss esplodeva a 500k. Passando a class_n=3, l'ottimizzatore è costretto a trovare una soluzione che vada bene per più classi, mantenendo i tensori su una "strada sana e generalizzata". In questo modo, quando arrivano alla Window 6, sono ancora sanissimi e la loss rimane su valori umani (1.5 - 2.5).
+
+L'Effetto Regolarizzatore della Quantizzazione delle Attivazioni: Quando usavi W4A16, le attivazioni (FP16) viaggiavano "libere". Nei modelli di diffusione capita spesso che ci siano outlier (valori di attivazione enormi, tipo 500 o 1000). Moltiplicare un outlier FP16 puro per un peso quantizzato a 4-bit (che è un po' impreciso) genera un errore gigantesco. Ora che abbiamo inserito la quantizzazione delle attivazioni (W4A8) con la nostra nuova funzione activation_quantize_tensor, tutti i valori vengono "schiacciati" dentro una griglia rigida a 8-bit (256 valori possibili) riga per riga, normalizzandoli con zmin e zmax. Questa griglia agisce come un potente scudo (regolarizzatore) che impedisce ai valori di esplodere, mantenendo la matematica stabile.
+
+Quindi sì, quel "500k" era davvero il segno di un collasso a catena! Aver aggiunto la stabilizzazione a 8-bit e più classi ha letteralmente salvato l'addestramento. Stiamo andando alla grande, direi che puoi fargli finire il giro!
+
+Dato curioso ma che dimostra l'efficienza di usare i timestep hidden state, nella V3 la loss media è 500k a window 4, mentre in slider quant V6 è 1.5. Ovviamente poi scala, ma V3 fino a 5 milioni, v6 fino a 1000.
+
+(Esempio di loss di V3)
+Window 4 - Epoch 1/10 completata | Loss Media: 506961.617910
+    Window 4 - Epoch 2/10 completata | Loss Media: 506957.256599
