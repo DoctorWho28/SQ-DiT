@@ -1,7 +1,56 @@
 import torch
 from diffusers import DiTPipeline
 import os
+import contextlib
+import sys
+import time
 
+class DualLogger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+# Reindirizza tutti i print sia sulla console che sul file di testo
+sys.stdout = DualLogger("log_comparativo.txt")
+
+@contextlib.contextmanager
+def track_vram(operation_name):
+    """
+    Context manager per misurare precisamente quanta VRAM
+    e quanto tempo viene utilizzato.
+    """
+    start_time = time.time()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        start_mem = torch.cuda.memory_allocated()
+    
+    yield
+    
+    elapsed_time = time.time() - start_time
+    
+    if torch.cuda.is_available():
+        end_mem = torch.cuda.memory_allocated()
+        peak_mem = torch.cuda.max_memory_allocated()
+        print(f"\n📊 [Track] {operation_name}")
+        print(f"  Tempo Trascorso:  {elapsed_time:.2f} secondi")
+        print(f"  Memoria Iniziale: {start_mem / 1024**2:.2f} MB")
+        print(f"  Memoria Finale:   {end_mem / 1024**2:.2f} MB")
+        print(f"  Picco Massimo:    {peak_mem / 1024**2:.2f} MB (Quella effettivamente necessaria!)")
+        print("-" * 50)
+    else:
+        print(f"\n📊 [Track] {operation_name}")
+        print(f"  Tempo Trascorso:  {elapsed_time:.2f} secondi")
+        print("-" * 50)
 # Impostazioni generali
 device = "cuda" if torch.cuda.is_available() else "cpu"
 class_labels = [399] # 207 = Golden Retriever
@@ -14,15 +63,21 @@ print("Inizio test comparativo...")
 # ==========================================
 print("\n--- TEST MODELLO ORIGINALE ---")
 base_model_id = "facebook/DiT-XL-2-256"
-print(f"Caricamento del modello base {base_model_id} in corso...")
-pipe_base = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
-pipe_base = pipe_base.to(device)
+
+# ESEMPIO: Misuriamo quanta RAM serve solo per caricare il modello base
+with track_vram("Caricamento Modello Base (FP16)"):
+    print(f"Caricamento del modello base {base_model_id} in corso...")
+    pipe_base = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
+    pipe_base = pipe_base.to(device)
 
 # IMPORTANTE: Resettiamo il seed esattamente prima della generazione!
 generator = torch.Generator(device=device).manual_seed(seed)
 
-print(f"Generazione in corso (Originale)...")
-output_base = pipe_base(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+# ESEMPIO: Misuriamo quanta RAM serve per eseguire la generazione vera e propria
+with track_vram("Generazione Immagine (Modello Base)"):
+    print(f"Generazione in corso (Originale)...")
+    output_base = pipe_base(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+
 image_base = output_base.images[0]
 image_base.save("immagine_dit_original.png")
 print("Immagine originale salvata come 'immagine_dit_original.png'")
@@ -48,8 +103,9 @@ else:
     # Altrimenti la seconda generazione usa rumore diverso e non possiamo fare un confronto alla pari!
     generator = torch.Generator(device=device).manual_seed(seed)
 
-    print(f"Generazione in corso (Quantizzato)...")
-    output_quant = pipe_quant(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    with track_vram("Generazione Immagine (Quantizzato V2)"):
+        print(f"Generazione in corso (Quantizzato)...")
+        output_quant = pipe_quant(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_quant = output_quant.images[0]
     image_quant.save("immagine_dit_quantized_v2.png")
     print("Immagine quantizzata salvata come 'immagine_dit_quantized_v2.png'")
@@ -109,8 +165,9 @@ else:
     print(f"Numero di step di inferenza impostati per la pipeline: {inference_steps}")
     print("-------------------------------\n")
 
-    print(f"Generazione in corso (V3 INT4)...")
-    output_v3 = pipe_v3(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    with track_vram("Generazione Immagine (V3 INT4)"):
+        print(f"Generazione in corso (V3 INT4)...")
+        output_v3 = pipe_v3(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_v3 = output_v3.images[0]
     image_v3.save("immagine_dit_quantized_v3.png")
     print("Immagine V3 salvata come 'immagine_dit_quantized_v3.png'")
@@ -179,8 +236,9 @@ else:
 
     generator = torch.Generator(device=device).manual_seed(seed)
 
-    print(f"Generazione in corso (V1 WXA16)...")
-    output_v1 = pipe_v1(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    with track_vram("Generazione Immagine (V1 WXA16)"):
+        print(f"Generazione in corso (V1 WXA16)...")
+        output_v1 = pipe_v1(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_v1 = output_v1.images[0]
     image_v1.save("immagine_dit_quantized_v1.png")
     print("Immagine V1 salvata come 'immagine_dit_quantized_v1.png'")
@@ -243,8 +301,9 @@ else:
     print(f"Layer 4 (Intermediate) è: {type(test_layer_int).__name__} a {test_layer_int.bits}-bit")
     print("-------------------------------\n")
 
-    print(f"Generazione in corso (V4 WXA16)...")
-    output_v4 = pipe_v4(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    with track_vram("Generazione Immagine (V4 WXA16)"):
+        print(f"Generazione in corso (V4 WXA16)...")
+        output_v4 = pipe_v4(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_v4 = output_v4.images[0]
     image_v4.save("immagine_dit_quantized_v4.png")
     print("Immagine V4 salvata come 'immagine_dit_quantized_v4.png'")
@@ -261,8 +320,9 @@ quant_v6_dir = "output/facebook/DiT-XL-2-256_v6"
 if not os.path.exists(quant_v6_dir):
     print(f"ATTENZIONE: Cartella {quant_v6_dir} non trovata. Hai eseguito l'ottimizzazione V6?")
 else:
-    print(f"Caricamento del modello base per V6 in corso...")
-    pipe_v6 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
+    with track_vram("Caricamento Modello Base per V6"):
+        print(f"Caricamento del modello base per V6 in corso...")
+        pipe_v6 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
     
     from other_implementations.slider_quant_v6 import WXAXLinear
     import torch.nn as nn
@@ -309,11 +369,12 @@ else:
     for layer_id in range(layer_shallow + layer_int, len(pipe_v6.transformer.transformer_blocks)):
         inject_wXax_v6(pipe_v6.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, act_bits=act_bits_ext)
         
-    print("Caricamento dei pesi impacchettati in uint8 da safetensors per V6...")
-    from safetensors.torch import load_file
-    transformer_state_dict = load_file(os.path.join(quant_v6_dir, "transformer", "diffusion_pytorch_model.safetensors"))
-    pipe_v6.transformer.load_state_dict(transformer_state_dict, strict=True)
-    pipe_v6 = pipe_v6.to(device)
+    with track_vram("Caricamento Pesi Quantizzati e Spostamento su GPU (V6)"):
+        print("Caricamento dei pesi impacchettati in uint8 da safetensors per V6...")
+        from safetensors.torch import load_file
+        transformer_state_dict = load_file(os.path.join(quant_v6_dir, "transformer", "diffusion_pytorch_model.safetensors"))
+        pipe_v6.transformer.load_state_dict(transformer_state_dict, strict=True)
+        pipe_v6 = pipe_v6.to(device)
 
     generator = torch.Generator(device=device).manual_seed(seed)
     
@@ -324,8 +385,9 @@ else:
     print(f"Layer 4 (Intermediate) è: {type(test_layer_int).__name__} (W{test_layer_int.weight_bits} A{test_layer_int.act_bits})")
     print("-------------------------------\n")
 
-    print(f"Generazione in corso (V6 WXAX)...")
-    output_v6 = pipe_v6(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
+    with track_vram("Generazione Immagine (V6 WXAX)"):
+        print(f"Generazione in corso (V6 WXAX)...")
+        output_v6 = pipe_v6(class_labels=class_labels, generator=generator, num_inference_steps=inference_steps)
     image_v6 = output_v6.images[0]
     image_v6.save("immagine_dit_quantized_v6.png")
     print("Immagine V6 salvata come 'immagine_dit_quantized_v6.png'")
