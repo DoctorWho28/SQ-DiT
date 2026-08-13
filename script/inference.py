@@ -3,12 +3,13 @@ import json
 import torch
 import torch.nn as nn
 from diffusers import DiTPipeline
-from slider_quant import WXAXLinear, SKIP_NAMES
+from script.slider_quant import WXAXLinear, SKIP_NAMES
 from safetensors.torch import load_file
 import random
 
 def load_quantized_pipeline(
     quant_dir: str,
+    device: str
 ) -> DiTPipeline:
     """
     Loads a DiT model quantized with SliderQuant and returns the ready-to-use pipeline.
@@ -21,7 +22,6 @@ def load_quantized_pipeline(
     Returns:
         DiTPipeline: The diffusion pipeline modified with the quantized weights.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
         
     if not os.path.exists(quant_dir):
         raise FileNotFoundError(f"Quantized model directory not found: {quant_dir}")
@@ -81,15 +81,13 @@ def load_quantized_pipeline(
     pipe = pipe.to(device)
     return pipe, inference_step
 
-def gen_image(quant_dir, class_label, seed=None):
-    pipe, inference_step = load_quantized_pipeline(
-        quant_dir= quant_dir
-    )
+def gen_image(quant_dir: str, class_label: list[int], device: str, seed: int | None = None):
+    pipe, inference_step = load_quantized_pipeline(quant_dir, device)
     
     if not seed:
         seed = random.randint(0, 10000)
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     generator = torch.Generator(device=device).manual_seed(seed)
     
     print("Generating test image...")
@@ -99,4 +97,5 @@ def gen_image(quant_dir, class_label, seed=None):
     
 if __name__ == "__main__":
     # Practical usage example
-    gen_image("Output/facebook/DiT-XL-2-256_v6", [19])
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    gen_image("output/facebook/DiT-XL-2-256_v6", [19], device)

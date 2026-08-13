@@ -187,7 +187,7 @@ else:
     print(f"Caricamento del modello base per V1 in corso...")
     pipe_v1 = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
     
-    from slider_quant import WXA16Linear
+    from script.slider_quant import WXA16Linear
     import torch.nn as nn
     import json
     

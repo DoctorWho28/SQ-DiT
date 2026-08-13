@@ -7,7 +7,7 @@ from tqdm import tqdm
 import math
 import matplotlib.pyplot as plt
 
-from slider_quant import SliderQuantLinear
+from script.slider_quant import SliderQuantLinear
 
 def apply_fake_quantization_to_module(module, bits=4, group_size=128):
     """

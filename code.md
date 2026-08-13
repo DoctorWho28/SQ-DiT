@@ -27,15 +27,11 @@ Passi del codice:
 
 4. Applicare la quantizzazione delle attivazioni
 
-TO-DO:
-    -Capire perchè calc_original_outputs non funziona e al timestep 680 layer 11 restituisce nan come valori. (risolto credo)
-    -Capire come salvare in modo migliore i latent originali di calc_original_outputs (prob torch.save) 
 
-La cartella temporanea è unica, quindi il resume è solo dell'ultima quantizzazione iniziata.
 
 NOI SALVIAMO I MODELLI IN QUESTO MODO NELLA CARTELLA FACEBOOK PER ESEMPIO:
-    -DiT-XL-2-256-w2a2_2
-    -DiT-XL-2-256-w2a2_3
+    -DiT-XL-2-256-w2a2-2
+    -DiT-XL-2-256-w2a2-3
 
 -- La parte 3 segue questa logica: mentre si traina il modello quantizzato l'input del layer 0 per ogni bucket è l'output del modello originale per il bucket precedente. La propagazione dell'errore (e la conseguente prova di correzione) viene resettata ad ogni bucket perché non sarebbe possibile quando si sta trainando il layer 0 sapere quale errore si è propagato dal layer finale nel bucket precedente.
 
@@ -67,14 +63,15 @@ Window 4 - Epoch 1/10 completata | Loss Media: 506961.617910
     Window 4 - Epoch 2/10 completata | Loss Media: 506957.256599
 
 
--To DO:
-    -Layer piu importanti dei DiT per "giustificare" i parametri della configurazione:
-        -layer_shallow, layer_int, layer_deep che parametri hanno? quindi quanto bits_ext?
-        - act_bits_int, act_bits_ext uniti o separati?
-        
-Per loggare tutte le informazioni usare gen fid images
-Creare un json per ogni modello quantizzato.
+-TODO:
+    - Controllare come gestire il caso in cui i bit siano 16
+    - Per loggare tutte le informazioni usare gen fid images con un tracker
 
-Cambiare i nomi dei modelli nell'output
-    -DiT-XL-2-256-w2a2
-    -DiT-XL-2-256-w2a2-v2
+
+Ordine delle cose da runnare:
+    - quantizer (--model, --config)
+    - gen_fid_images
+    - calculate_metrics
+
+Per creare solo un'immagine:
+    - inference

@@ -1,6 +1,3 @@
-import json
-import os
-import time
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -106,15 +103,15 @@ class WXAXLinear(nn.Module):
     """
     A dynamic WXAX linear layer (Weight-Activation Quantization). 
     Stores weights physically packed as uint8 based on specified weight_bits (2, 4, 8).
-    At runtime, quantizes activations to act_bits, unpacks weights to fp16, scales, and computes linear.
+    At runtime, quantizes activations to bits_act, unpacks weights to fp16, scales, and computes linear.
     """
-    def __init__(self, in_features: int, out_features: int, group_size: int, weight_bits: int, act_bits: int, bias: bool):
+    def __init__(self, in_features: int, out_features: int, group_size: int, weight_bits: int, bits_act: int, bias: bool):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
         self.weight_bits = weight_bits
-        self.act_bits = act_bits
+        self.bits_act = bits_act
         
         pack_factor = 8 // weight_bits
         assert in_features % pack_factor == 0, f"in_features {in_features} not divisible by packing factor {pack_factor}"
@@ -130,7 +127,7 @@ class WXAXLinear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Quantize activations dynamically token-wise
-        x_quantized = quantize_tensor(x, self.act_bits, -1)
+        x_quantized = quantize_tensor(x, self.bits_act, -1)
         
         # Unpack weights on the fly
         unpacked_int = unpack_intX_weights(self.weight_packed, (self.out_features, self.in_features), self.weight_bits).half()
@@ -150,12 +147,12 @@ class SliderQuantLinear(nn.Module):
     """
     Wrapper for Fake Quantization during training with dynamic weight and activation bits.
     """
-    def __init__(self, original_linear: nn.Linear, weight_bits: int, act_bits: int, rank: int, gamma: float, group_size: int):
+    def __init__(self, original_linear: nn.Linear, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int):
         super().__init__()
         self.in_features = original_linear.in_features
         self.out_features = original_linear.out_features
         self.weight_bits = weight_bits
-        self.act_bits = act_bits
+        self.bits_act = bits_act
         self.rank = rank
         self.gamma = gamma
         self.group_size = group_size
@@ -182,7 +179,7 @@ class SliderQuantLinear(nn.Module):
         x_scaled = x_f32 / safe_alpha_scale
         
         # Quantize activations
-        x_quantized = quantize_tensor(x_scaled, self.act_bits, -1)
+        x_quantized = quantize_tensor(x_scaled, self.bits_act, -1)
         
         w_adjusted = w_f32 * safe_alpha_scale.view(1, -1) + torch.matmul(self.A, self.B)
         
@@ -207,20 +204,20 @@ class SliderQuantLinear(nn.Module):
             out = F.linear(x_scaled, w_adjusted, bias_f32)
         return out.to(orig_dtype)
 
-def replace_linears_with_sliderquant(module: nn.Module, weight_bits: int, act_bits: int, rank: int, gamma: float, group_size: int, skip_names: list[str]) -> list[nn.Module]:
+def replace_linears_with_sliderquant(module: nn.Module, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int, skip_names: list[str]) -> list[nn.Module]:
     replaced_modules = []
     for name, child in module.named_children():
         if any(skip in name for skip in skip_names):
             continue
             
         if isinstance(child, nn.Linear):
-            sq_linear = SliderQuantLinear(child, weight_bits=weight_bits, act_bits=act_bits, rank=rank, gamma=gamma, group_size=group_size)
+            sq_linear = SliderQuantLinear(child, weight_bits=weight_bits, bits_act=bits_act, rank=rank, gamma=gamma, group_size=group_size)
             setattr(module, name, sq_linear)
             replaced_modules.append(sq_linear)
         elif isinstance(child, SliderQuantLinear):
             replaced_modules.append(child)
         else:
-            replaced_modules.extend(replace_linears_with_sliderquant(child, weight_bits, act_bits, rank, gamma, group_size, skip_names))
+            replaced_modules.extend(replace_linears_with_sliderquant(child, weight_bits, bits_act, rank, gamma, group_size, skip_names))
     return replaced_modules
 
 def merge_and_pack_linears(module: nn.Module) -> None:
@@ -249,7 +246,7 @@ def merge_and_pack_linears(module: nn.Module) -> None:
                 quantized_flat = quantized.view(child.out_features, child.in_features)
                 
                 # Create True Integer Packed layer dynamically
-                real_int_linear = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=child.weight_bits, act_bits=child.act_bits, bias=(child.bias is not None))
+                real_int_linear = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=child.weight_bits, bits_act=child.bits_act, bias=(child.bias is not None))
                 
                 real_int_linear.weight_packed.copy_(pack_weights_to_intX(quantized_flat, child.weight_bits))
                 real_int_linear.scales.copy_(safe_alpha_group.half())
@@ -285,7 +282,7 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
                     
 
 
-def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, act_bits_int: int, act_bits_ext: int, rank: int, group_size: int, batch_size: int) -> DiTPipeline:
+def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, bits_act: int, rank: int, group_size: int, batch_size: int) -> DiTPipeline:
     latents_x0 = torch.randn((batch_size, 4, 32, 32), device=device, dtype=torch.float16)
     class_steps = int(1000/class_num)
     class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)]
@@ -301,8 +298,6 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     
     original_outputs = calc_original_outputs(pipe, timesteps, class_id, timestep_hidden_states, batch_size)
     
-    total_start_time = time.time()
-    
     # === STAGE: WINDOW DISTILLATION ===
     print("=== STAGE: WINDOW DISTILLATION ===")
     for window_id, window in enumerate(window_list):
@@ -316,11 +311,11 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
             layer_module.float()
             
             if layer_id < layer_shallow or layer_id >= (layer_shallow + layer_int):
-                print(f"Layer {layer_id}: SHALLOW/DEEP -> Quantized W{bits_ext}A{act_bits_ext}")
-                linear_modules += replace_linears_with_sliderquant(layer_module, bits_ext, act_bits_ext, rank, gamma, group_size, SKIP_NAMES)
+                print(f"Layer {layer_id}: SHALLOW/DEEP -> Quantized W{bits_ext}A{bits_act}")
+                linear_modules += replace_linears_with_sliderquant(layer_module, bits_ext, bits_act, rank, gamma, group_size, SKIP_NAMES)
             else:
-                print(f"Layer {layer_id}: INTERMEDIATE -> Quantized W{bits_int}A{act_bits_int}")
-                linear_modules += replace_linears_with_sliderquant(layer_module, bits_int, act_bits_int, rank, gamma, group_size, SKIP_NAMES)
+                print(f"Layer {layer_id}: INTERMEDIATE -> Quantized W{bits_int}A{bits_act}")
+                linear_modules += replace_linears_with_sliderquant(layer_module, bits_int, bits_act, rank, gamma, group_size, SKIP_NAMES)
 
         for sq_mod in linear_modules:
             if isinstance(sq_mod, SliderQuantLinear):
@@ -387,9 +382,6 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
 
     print("=== PACKING E MERGING WXAX ===")
     merge_and_pack_linears(pipe.transformer)
-    
-    total_end_time = time.time()
-    print(f"Total OPTIMIZATION time (full): {total_end_time - total_start_time:.2f} seconds")
 
     return pipe
 
