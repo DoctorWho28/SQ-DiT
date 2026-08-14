@@ -340,7 +340,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
             with torch.no_grad():
                 for c_val in class_id:
                     c = torch.tensor([c_val.item()] * batch_size, device=device)
-                    for t_id, t in enumerate(timesteps):
+                    for t in timesteps:
                         t_value = t.item()
                         
                         base_latents = timestep_hidden_states[t_value].clone()
@@ -355,7 +355,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                             
                         window_inputs_cache[(c_val.item(), t_value)] = latents_copy.detach().half()
 
-            for current_epoch in range(epoch_num):   
+            for current_epoch in range(epoch_num):
                 optimizer.zero_grad()
                 epoch_loss = 0 
                 for c_val in class_id:

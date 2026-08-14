@@ -6,9 +6,60 @@ import time
 from tqdm import tqdm
 from inference import load_quantized_pipeline
 from diffusers import DiTPipeline
+import contextlib
 
-def generate_fid_images(output_dir: str,
-    pipe: DiTPipeline,
+SAVE_STEP = 1000
+
+
+@contextlib.contextmanager
+def track_info():
+    info = {}
+    use_cuda = torch.cuda.is_available()
+    
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats()
+        
+    start_time = time.time()
+    
+    yield info
+
+    info["time"] = time.time() - start_time
+    
+    if use_cuda:
+        info["vram"] = torch.cuda.max_memory_allocated() / (1024**3)
+    else:
+        info["vram"] = 0.0
+
+
+def save_json_info(total_info: list[dict], model_id: str, calc_final: bool = False):
+    json_path = f"json/{model_id}.json"
+
+    if not os.path.exists(json_path):
+        json_path = "../" + json_path
+
+    with open(json_path, "r") as J:
+        json_file = json.load(J)
+
+    if "generation" not in json_file:
+        json_file["generation"] = {
+            "mean_time": 0,
+            "vram_max": 0,
+            "single_values": []}
+
+    json_file["generation"]["single_values"] += total_info 
+
+    if calc_final:
+        json_file["generation"]["mean_time"] = sum([x["time"] for x in json_file["generation"]["single_values"]]) / len(json_file["generation"]["single_values"])
+        json_file["generation"]["vram_max"] = max([x["vram"] for x in json_file["generation"]["single_values"]])
+
+
+    with open(json_path, "w") as J:
+        json.dump(json_file,J,indent=4)
+
+
+
+def generate_fid_images(pipe: DiTPipeline,
+    model_id: str,
     inference_step: int,
     batch_size: int,
     seed: int,
@@ -17,7 +68,9 @@ def generate_fid_images(output_dir: str,
 ):
     if hasattr(pipe, "safety_checker"):
         pipe.safety_checker = None
-        
+
+    output_dir = f"FID_images/{model_id}"
+
     generator = torch.Generator(device=device)
     total_classes = 1000
     
@@ -27,9 +80,8 @@ def generate_fid_images(output_dir: str,
     print(f"Batch size: {batch_size}. This operation will take several hours.")
     print("Note: The script supports RESUME. If interrupted, it will resume from where it stopped by skipping already generated images.")
 
-    total_time = 0
-    image_generated = 0
-
+    total_info = []
+    image_before_save = SAVE_STOP
     
     with tqdm(total=total_classes * images_per_class, desc="FID Generation") as pbar:
         for class_id in range(total_classes):
@@ -52,16 +104,22 @@ def generate_fid_images(output_dir: str,
                 current_batch = min(batch_size, images_to_generate)
                 class_labels = [class_id] * current_batch
 
-                start_img_gen = time.time()
                 
-                output = pipe(
-                    class_labels=class_labels,
-                    generator=generator,
-                    num_inference_steps=inference_step
-                )
+                with track_info() as info:
+                    output = pipe(
+                        class_labels=class_labels,
+                        generator=generator,
+                        num_inference_steps=inference_step
+                    )
 
-                total_time += time.time() - start_img_gen
-                image_generated += current_batch
+                total_info.append(info)
+
+                image_before_save -= current_batch
+                if image_before_save <= 0:
+                    save_json_info(total_info,model_id)
+                    image_before_save = SAVE_STEP
+                    total_info = []
+
                 
                 for img in output.images:
                     img_name = f"class_{class_id:03d}_img_{current_idx:02d}.png"
@@ -73,7 +131,7 @@ def generate_fid_images(output_dir: str,
 
     print(f"\nGeneration of {total_classes * images_per_class} images completed successfully!")
 
-    return total_time, image_generated
+    return total_info
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -91,8 +149,6 @@ if __name__ == "__main__":
     batch_size = args.batch_size
     seed = args.seed
 
-    #TEMPORANEO, SOLO PER COMODITA
-    model_id = "facebook/DiT-XL-2-256_v6"
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -111,9 +167,9 @@ if __name__ == "__main__":
         pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
         pipe = pipe.to(device)
     
-    total_time, img_generated = generate_fid_images(
-        "FID_Images/"+model_id,
+    total_info = generate_fid_images(
         pipe,
+        model_id,
         inference_step,
         batch_size,     
         seed, 
@@ -121,22 +177,5 @@ if __name__ == "__main__":
         image_num
     )
 
-    if img_generated == 0:
-        exit(1)
-    # Statistic saving
-    json_path = f"json/{model_id}.json"
 
-    if not os.path.exists(json_path):
-        json_path = "../" + json_path
-
-    with open(json_path, "r") as J:
-        json_file = json.load(J)
-
-    json_file["generation"] = {
-        "mean_time": (total_time / img_generated),
-        "RAM": 1000 #TODO
-        }
-
-    with open(json_path, "w") as J:
-        json.dump(json_file,J,indent=4)
-
+    save_json_info(total_info,model_id,calc_final=True)

@@ -13,6 +13,7 @@ import pytorch_fid.fid_score
 from pytorch_fid.inception import InceptionV3
 from torchmetrics.image.inception import InceptionScore
 import pyiqa
+from clip_mmd import logic
 
 OriginalDataset = pytorch_fid.fid_score.ImagePathDataset
 
@@ -32,7 +33,7 @@ class ResizingDataset(OriginalDataset):
         return self.custom_transforms(img)
 
 class ImageFolderDataset(Dataset):
-    """Semplice dataloader per caricare le immagini da una cartella."""
+    """Dataloader to load image from a folder"""
     def __init__(self, folder_path, transform=None):
         self.folder_path = folder_path
         if not os.path.exists(folder_path):
@@ -71,20 +72,7 @@ def download_imagenet_val(output_dir: str):
         img.save(os.path.join(output_dir, f"val_{i:05d}.png"))
 
 
-def compute_fid(path_dataset: str, path_generated: str, batch_size: int, device: str, dims: int = 2048):
-
-    if not path_dataset or not os.path.exists(path_dataset):
-        print(f"CRITICAL ERROR: Dataset images path does not exist: {path_dataset}")
-        return
-        
-    if not os.path.exists(path_generated):
-        print(f"CRITICAL ERROR: Generated images path does not exist: {path_generated}")
-        return
-        
-    print(f"\nStarting FID calculation...")
-    print(f"Dataset 1 (Real / Statistics): {path_dataset}")
-    print(f"Dataset 2 (Generated Images):   {path_generated}")
-    
+def compute_fid(path_dataset: str, path_generated: str, batch_size: int, device: str, dims: int = 2048):    
     paths = [path_dataset, path_generated]
     
     try:
@@ -107,10 +95,7 @@ def compute_fid(path_dataset: str, path_generated: str, batch_size: int, device:
 
 
 def calculate_inception_score(path_generated: str, batch_size: int, device: str):
-    print(f"\n--- Calculating Inception Score (IS) ---")
-    print(f"Loading images from: {path_generated}")
     
-    # torchmetrics IS wants tensor uint8 in range [0, 255]
     transform = TF.Compose([
         TF.Resize(256), 
         TF.CenterCrop(256),
@@ -122,7 +107,7 @@ def calculate_inception_score(path_generated: str, batch_size: int, device: str)
     
     isc = InceptionScore().to(device)
     
-    for batch in tqdm(dataloader, desc="Calculating IS"):
+    for batch in dataloader:
         isc.update(batch.to(device))
         
     mean, std = isc.compute()
@@ -130,16 +115,9 @@ def calculate_inception_score(path_generated: str, batch_size: int, device: str)
     return mean.item(), std.item()
 
 
-def calculate_sfid(path_dataset: str, path_generated: str, batch_size: int, device: str):
-    print(f"\n--- Calculating spatial FID (sFID) ---")
-    print(f"Real images: {path_dataset}")
-    print(f"Generated images: {path_generated}")
-    
-    # Inizializza la metrica sFID di pyiqa (scarica i pesi se necessario)
+def calculate_sfid(path_dataset: str, path_generated: str, device: str):
     sfid_metric = pyiqa.create_metric('sfid', device=device)
     
-    # pyiqa accetta direttamente i path delle cartelle
-    print("Extracting features and computing sFID...")
     sfid_score_tensor = sfid_metric(path_dataset, path_generated)
     sfid_value = sfid_score_tensor.item()
     
@@ -147,6 +125,24 @@ def calculate_sfid(path_dataset: str, path_generated: str, batch_size: int, devi
     return sfid_value
 
 
+def calculate_cmmd(path_dataset: str, path_generated: str, device: str):
+    
+    try:
+        parallel = False
+        device_id = []
+        if device == "cuda":
+            device_id = [1]
+            parallel = True
+            
+        prep = logic.CMMD(data_parallel=parallel, device=device_id) 
+        
+        cmmd_score = prep.execute(path_dataset, path_generated)
+        print(f"CMMD SCORE: {cmmd_score:.4f}")
+        return float(cmmd_score)
+        
+    except Exception as e:
+        print(f"\nAn error occurred during CMMD calculation: {e}")
+        return None
 
 
 
@@ -175,12 +171,16 @@ if __name__ == "__main__":
 
     if download:
         download_imagenet_val(path_dataset)
+
+    assert(os.path.exists(path_dataset)),f"The path of dataset doesn't exists"
+    assert(os.path.exists(path_generated)),f"The path of generated images desn't exists"
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     fid_score = compute_fid(path_dataset, path_generated, batch_size, device)
     is_mean, is_std = calculate_inception_score(path_generated, batch_size, device)
-    sfid_score = calculate_sfid(path_dataset, path_generated, batch_size, device)
+    sfid_score = calculate_sfid(path_dataset, path_generated, device)
+    cmmd_score = calculate_cmmd(path_dataset, path_generated, device)
     
     # Statistic saving
     with open(json_path, "r") as J:
@@ -190,7 +190,8 @@ if __name__ == "__main__":
         "FID": fid_score,
         "sFID": sfid_score,
         "IS (mean)": is_mean,
-        "IS (std)": is_std
+        "IS (std)": is_std,
+        "CMMD": cmmd_score
         }
 
     with open(json_path, "w") as J:
