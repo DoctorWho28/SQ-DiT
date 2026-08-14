@@ -60,17 +60,16 @@ def track_info(operation_name):
         print(f"\n--- {operation_name} Info ---")
         print(f"Time: {info['time']:.2f}s | VRAM: N/A (CPU Mode)")
 
-class DualLogger:
-    def __init__(self, filename):
-        self.terminal = sys.stdout
-        self.log = open(filename, "w", encoding="utf-8")
+class BufferedFileLogger:
+    def __init__(self, filename, buffer_kb=8):
+        # Apre il file in scrittura, specificando il buffer in byte
+        self.log = open(filename, "w", encoding="utf-8", buffering=buffer_kb * 1024)
         
     def write(self, message):
-        self.terminal.write(message)
+        # Scrive solo nel file, non più nel terminale
         self.log.write(message)
         
     def flush(self):
-        self.terminal.flush()
         self.log.flush()
 
 if __name__== "__main__":
@@ -137,7 +136,7 @@ if __name__== "__main__":
     assert(inference_step>0 and inference_step<=1000),"Inference step must be in range [1,1000]"
     
     model_id_safe = model_id.replace("/", "_")
-    sys.stdout = DualLogger(f"log_quantization_{model_id_safe}_W{bits_int}_A{bits_act}.txt")
+    sys.stdout = BufferedFileLogger(f"log_quantization_{model_id_safe}_W{bits_int}_A{bits_act}.txt", buffer_kb=8)
     
     print(f"Epochs: {epoch_num}")
     print(f"Quantization: W{bits_int}A{bits_act} (Ext: W{bits_ext}A{bits_act})")

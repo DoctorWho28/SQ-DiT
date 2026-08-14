@@ -1,3 +1,4 @@
+from tqdm import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -303,7 +304,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     
     # === STAGE: WINDOW DISTILLATION ===
     print("=== STAGE: WINDOW DISTILLATION ===")
-    for window_id, window in enumerate(window_list):
+    for window_id, window in tqdm(enumerate(window_list), "windows quantization", position = 0, total= len(window_list)):
         print(f"===================================")
         print(f"Window {window_id}/{len(window_list)-1}: {window}")
         linear_modules = []
@@ -355,7 +356,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                             
                         window_inputs_cache[(c_val.item(), t_value)] = latents_copy.detach().half()
 
-            for current_epoch in range(epoch_num):
+            for current_epoch in tqdm(range(epoch_num), desc=f"Phase {g_id+1} of 2 with gamma= {g}", position=1, leave=False):
                 optimizer.zero_grad()
                 epoch_loss = 0 
                 for c_val in class_id:
