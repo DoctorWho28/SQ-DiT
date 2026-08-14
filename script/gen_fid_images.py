@@ -81,7 +81,7 @@ def generate_fid_images(pipe: DiTPipeline,
     print("Note: The script supports RESUME. If interrupted, it will resume from where it stopped by skipping already generated images.")
 
     total_info = []
-    image_before_save = SAVE_STOP
+    image_before_save = SAVE_STEP
     
     with tqdm(total=total_classes * images_per_class, desc="FID Generation") as pbar:
         for class_id in range(total_classes):
