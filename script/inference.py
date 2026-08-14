@@ -3,9 +3,10 @@ import json
 import torch
 import torch.nn as nn
 from diffusers import DiTPipeline
-from script.slider_quant import WXAXLinear, SKIP_NAMES
+from slider_quant import WXAXLinear, SKIP_NAMES
 from safetensors.torch import load_file
 import random
+import argparse
 
 def load_quantized_pipeline(
     quant_dir: str,
@@ -35,12 +36,11 @@ def load_quantized_pipeline(
         q_config = json.load(f)
         
     layer_shallow = q_config.get("layer_shallow")
-    layer_int = q_config.get("layer_int")
+    layer_deep = q_config.get("layer_deep")
     group_size = q_config.get("group_size")
     bits_int = q_config.get("bits_int")
     bits_ext = q_config.get("bits_ext")
-    act_bits_int = q_config.get("act_bits_int")
-    act_bits_ext = q_config.get("act_bits_ext")
+    bits_act = q_config.get("bits_act")
     inference_step = q_config.get("inference_step")
 
     index_path = os.path.join(quant_dir, "model_index.json")
@@ -52,27 +52,29 @@ def load_quantized_pipeline(
     print(f"Loading base model {base_model_id}...")
     pipe = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
     
+    layer_int = len(pipe.transformer.transformer_blocks) - layer_shallow - layer_deep
+    
     print(f"Injecting mixed WXAX layers...")
     
-    def inject_wXax(module, weight_bits, act_bits):
+    def inject_wXax(module, weight_bits, bits_act):
         for name, child in module.named_children():
             if any(skip in name for skip in SKIP_NAMES):
                 continue
             if isinstance(child, nn.Linear):
-                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=weight_bits, act_bits=act_bits, bias=(child.bias is not None))
+                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=weight_bits, bits_act=bits_act, bias=(child.bias is not None))
                 setattr(module, name, wX)
             else:
-                inject_wXax(child, weight_bits, act_bits)
+                inject_wXax(child, weight_bits, bits_act)
                 
     # Shallow Injection
     for layer_id in range(layer_shallow):
-        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, act_bits=act_bits_ext)
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, bits_act=bits_act)
     # Intermediate Injection
     for layer_id in range(layer_shallow, layer_shallow + layer_int):
-        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_int, act_bits=act_bits_int)
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_int, bits_act=bits_act)
     # Deep Injection
     for layer_id in range(layer_shallow + layer_int, len(pipe.transformer.transformer_blocks)):
-        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, act_bits=act_bits_ext)
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, bits_act=bits_act)
         
     print("Loading packed uint8 weights from safetensors...")
     transformer_state_dict = load_file(os.path.join(quant_dir, "transformer", "diffusion_pytorch_model.safetensors"))
@@ -81,21 +83,46 @@ def load_quantized_pipeline(
     pipe = pipe.to(device)
     return pipe, inference_step
 
-def gen_image(quant_dir: str, class_label: list[int], device: str, seed: int | None = None):
+def gen_quant_image(quant_dir: str, class_label: list[int], device: str, seed: int | None = None):
     pipe, inference_step = load_quantized_pipeline(quant_dir, device)
-    
-    if not seed:
+
+    if seed is None:
         seed = random.randint(0, 10000)
-    
     
     generator = torch.Generator(device=device).manual_seed(seed)
     
     print("Generating test image...")
     output = pipe(class_labels=class_label, generator=generator, num_inference_steps=inference_step)
     output.images[0].save(f"quantized_image_seed_{seed}.png")
-    print("Image saved as 'quantized_image_seed_{seed}.png'")
+    print(f"Image saved as 'quantized_image_seed_{seed}.png'")
+
+def gen_orig_image(model_id: str, inference_step: int, class_label: list[int], device: str, seed: int | None = None):
+    pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+    pipe = pipe.to(device)
+
+    if seed is None:
+        seed = random.randint(0, 10000)
+    
+    generator = torch.Generator(device=device).manual_seed(seed)
+    
+    print(f"Generating test image with original model ({model_id})...")
+    output = pipe(class_labels=class_label, generator=generator, num_inference_steps=inference_step)
+    output.images[0].save(f"original_image_seed_{seed}.png")
+    print(f"Image saved as 'original_image_seed_{seed}.png'")
     
 if __name__ == "__main__":
-    # Practical usage example
+    parser = argparse.ArgumentParser(description="Generate an image from a quantized or original DiT model.")
+    parser.add_argument("-d", "--quant_dir", type=str, default=None, help="Path to the quantized model directory")
+    parser.add_argument("-m", "--model", type=str, default=None, help="HuggingFace model ID for original model (e.g. facebook/DiT-XL-2-256)")
+    parser.add_argument("-i", "--inference_steps", type=int, default=20, help="Number of inference steps (required for original model)")
+    parser.add_argument("-c", "--class_label", type=int, default=19, help="Class label to generate (default: 19)")
+    parser.add_argument("-s", "--seed", type=int, default=None, help="Random seed (default: random)")
+    
+    args = parser.parse_args()
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    gen_image("output/facebook/DiT-XL-2-256_v6", [19], device)
+    
+    if args.quant_dir:
+        gen_quant_image(args.quant_dir, [args.class_label], device, seed=args.seed)
+    if args.model:
+        gen_orig_image(args.model, args.inference_steps, [args.class_label], device, seed=args.seed)

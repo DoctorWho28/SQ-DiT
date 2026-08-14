@@ -224,7 +224,7 @@ def merge_and_pack_linears(module: nn.Module) -> None:
     for name, child in module.named_children():
         if isinstance(child, SliderQuantLinear):
             with torch.no_grad():
-                safe_alpha = torch.clamp(child.alpha, min=0.1, max=10.0)
+                safe_alpha = torch.clamp(child.alpha_scale, min=0.1, max=10.0)
                 w_adjusted = child.weight * safe_alpha.view(1, -1) + (child.A @ child.B)
                 
                 w_final_merged = w_adjusted / safe_alpha.view(1, -1)
@@ -276,7 +276,10 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
                 
                 for layer_id, layer in enumerate(pipe.transformer.transformer_blocks):
                     latents_out = layer(latents_copy, timestep=t_batch, class_labels=c_batch)
-                    original_outputs[(c_value, t_value, layer_id)] = latents_out.clone().detach()
+                    if isinstance(latents_out, tuple):
+                        latents_out = latents_out[0]
+                    latents_copy = latents_out.clone().detach()
+                    original_outputs[(c_value, t_value, layer_id)] = latents_copy.cpu().half()
 
     return original_outputs
                     
@@ -285,7 +288,7 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
 def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, bits_act: int, rank: int, group_size: int, batch_size: int) -> DiTPipeline:
     latents_x0 = torch.randn((batch_size, 4, 32, 32), device=device, dtype=torch.float16)
     class_steps = int(1000/class_num)
-    class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)]
+    class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)][:class_num]
     
     timestep_hidden_states = {}
     with torch.no_grad():

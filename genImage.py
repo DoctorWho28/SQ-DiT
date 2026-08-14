@@ -53,7 +53,7 @@ def track_vram(operation_name):
         print("-" * 50)
 # Impostazioni generali
 device = "cuda" if torch.cuda.is_available() else "cpu"
-class_labels = [399] # 207 = Golden Retriever
+class_labels = [100] # 207 = Golden Retriever
 inference_steps = 20 # FONDAMENTALE: usiamo gli stessi step per entrambi!
 seed = 42
 print("Inizio test comparativo...")

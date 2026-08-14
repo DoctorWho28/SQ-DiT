@@ -1,5 +1,7 @@
+import contextlib
 import argparse
 import torch
+import sys
 import yaml
 import json
 import os
@@ -33,21 +35,53 @@ def calculate_window_index(layer_shallow: int, layer_int: int, layer_deep: int, 
 
     return window_list
 
+@contextlib.contextmanager
+def track_info(operation_name):
+    info = {}
+    use_cuda = torch.cuda.is_available()
+    
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats()
+        
+    start_time = time.time()
+    
+    yield info
+
+    info["time"] = time.time() - start_time
+    
+    if use_cuda:
+        info["vram_end"] = torch.cuda.memory_allocated() / (1024**3)
+        info["vram_peak"] = torch.cuda.max_memory_allocated() / (1024**3)
+        print(f"\n--- {operation_name} Info ---")
+        print(f"Time: {info['time']:.2f}s | VRAM End: {info['vram_end']:.2f} GB | VRAM Peak: {info['vram_peak']:.2f} GB")
+    else:
+        info["vram_end"] = 0.0
+        info["vram_peak"] = 0.0
+        print(f"\n--- {operation_name} Info ---")
+        print(f"Time: {info['time']:.2f}s | VRAM: N/A (CPU Mode)")
+
+class DualLogger:
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w", encoding="utf-8")
+        
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
 if __name__== "__main__":
+    
     parser = argparse.ArgumentParser()
-    #Da riattivare required nella versione finale
-    parser.add_argument("-m", "--model", type=str ,required=False, help="Model name (required)")
+    parser.add_argument("-m", "--model", type=str ,required=True, help="Model name (required)")
     parser.add_argument("-c", "--config", type=str, default="config.yaml", help="Path to config yaml")
 
     args = parser.parse_args()
     model_id = args.model
     config_path = args.config
-
-
-    
-    #TEMPORANEO, SOLO PER COMODITA
-    model_id = "facebook/DiT-XL-2-256"
-
 
     print(f"Model: {model_id}")
     print(f"Config file: {config_path}")
@@ -57,7 +91,6 @@ if __name__== "__main__":
 
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-
 
     # Config parameters and checks
     epoch_num = config.get('epoch', 1)
@@ -102,7 +135,9 @@ if __name__== "__main__":
 
     inference_step = config.get('inference_step', 20)
     assert(inference_step>0 and inference_step<=1000),"Inference step must be in range [1,1000]"
-
+    
+    model_id_safe = model_id.replace("/", "_")
+    sys.stdout = DualLogger(f"log_quantization_{model_id_safe}_W{bits_int}_A{bits_act}.txt")
     
     print(f"Epochs: {epoch_num}")
     print(f"Quantization: W{bits_int}A{bits_act} (Ext: W{bits_ext}A{bits_act})")
@@ -123,26 +158,17 @@ if __name__== "__main__":
     timesteps = [t.unsqueeze(0) for t in timesteps]
 
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
-
-
-    torch.cuda.reset_peak_memory_stats()
-    start_quant = time.time()
-
-    # Apply SliderQuant (modifies the pipe)
-    pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, bits_act, rank, group_size, batch_size)
-
-
-    quantization_time = time.time() - start_quant
-    vram_end = torch.cuda.memory_allocated() / (1024**3)
-    vram_peak = torch.cuda.max_memory_allocated() / (1024**3)
-
+    
+    with track_info("Quantization") as info:
+        pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, bits_act, rank, group_size, batch_size)
 
     # Save the quantized model
-    out_dir = f"output/{model_id}-W{bits_int}A{bits_act}"
+    base_out_dir = f"output/{model_id}-W{bits_int}A{bits_act}"
+    out_dir = base_out_dir
     id = 1
     while os.path.exists(out_dir):
         id += 1
-        out_dir = f"output/{model_id}-W{bits_int}A{bits_act}-{id}"
+        out_dir = f"{base_out_dir}-{id}"
     
 
     os.makedirs(out_dir, exist_ok=True)
@@ -162,22 +188,18 @@ if __name__== "__main__":
     def get_dir_size(path):
             return sum(os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(path) for f in filenames)
 
-
     model_size = get_dir_size(out_dir) / (1024**2)
 
 
     # JSON of data
-    json_path = f"json/{model_id}-W{bits_int}A{bits_act}-{id}.json"
+    json_path = f"json/{os.path.basename(out_dir)}.json"
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
 
     json_file = {"quantization":{
-        "time": quantization_time,
-        "vram_quant_model": vram_end,
-        "vram_max_quant": vram_peak,
+        "time": info["time"],
+        "vram_quant_model": info["vram_end"],
+        "vram_max_quant": info["vram_peak"],
         "model_size (MB)": model_size}}
 
     with open(json_path,"w") as J:
         json.dump(json_file,J,indent=4)
-
-
-
-    

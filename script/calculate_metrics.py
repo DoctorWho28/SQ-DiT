@@ -1,5 +1,6 @@
 import os
 import json
+import argparse
 import torch
 import torchvision.transforms as TF
 from PIL import Image
@@ -11,7 +12,7 @@ from datasets import load_dataset
 import pytorch_fid.fid_score
 from pytorch_fid.inception import InceptionV3
 from torchmetrics.image.inception import InceptionScore
-
+import pyiqa
 
 OriginalDataset = pytorch_fid.fid_score.ImagePathDataset
 
@@ -129,79 +130,20 @@ def calculate_inception_score(path_generated: str, batch_size: int, device: str)
     return mean.item(), std.item()
 
 
-def compute_sfid_statistics(path: str, batch_size: int, device: str):
-    """
-    Calcola la media e la matrice di covarianza per lo spatial FID (sFID).
-    Per evitare errori di Out Of Memory, calcoliamo le statistiche in modo 
-    iterativo accumulando la somma e la somma dei prodotti (Outer Product).
-    """
-    transform = TF.Compose([
-        TF.Resize(256),
-        TF.CenterCrop(256),
-        TF.ToTensor() # Returns float in range [0, 1] for InceptionV3
-    ])
-    
-    dataset = ImageFolderDataset(path, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=min(os.cpu_count() or 4, 4))
-    
-    # shape (B, 2048, 8, 8)
-    model = InceptionV3([2]).to(device)
-    model.eval()
-    
-    
-    sum_x = torch.zeros(2048, dtype=torch.float64, device=device)
-    sum_xx = torch.zeros((2048, 2048), dtype=torch.float64, device=device)
-    num_samples = 0
-    
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"Extracting sFID stats for {os.path.basename(path)}"):
-            batch = batch.to(device)
-            feat = model(batch)[0] 
-            
-            # From (B, 2048, H, W) to (B*H*W, 2048)
-            feat = feat.permute(0, 2, 3, 1).reshape(-1, 2048).to(torch.float64)
-            
-            sum_x += feat.sum(dim=0)
-            sum_xx += feat.T @ feat
-            num_samples += feat.shape[0]
-            
-    
-    mu = (sum_x / num_samples).cpu().numpy()
-    
-    # Covariance: E[X * X**T] - E[X] * E[X]**T
-    sigma = (sum_xx / (num_samples - 1)) - (torch.outer(sum_x, sum_x) / (num_samples * (num_samples - 1)))
-    sigma = sigma.cpu().numpy()
-    
-    return mu, sigma
-
-def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
-    """Calcola la distanza di Fréchet basata su mu e sigma."""
-    diff = mu1 - mu2
-    covmean, _ = linalg.sqrtm(sigma1.dot(sigma2), disp=False)
-    
-    if not np.isfinite(covmean).all():
-        offset = np.eye(sigma1.shape[0]) * eps
-        covmean = linalg.sqrtm((sigma1 + offset).dot(sigma2 + offset))
-        
-    if np.iscomplexobj(covmean):
-        covmean = covmean.real
-        
-    tr_covmean = np.trace(covmean)
-    return (diff.dot(diff) + np.trace(sigma1) + np.trace(sigma2) - 2 * tr_covmean)
-
-
 def calculate_sfid(path_dataset: str, path_generated: str, batch_size: int, device: str):
     print(f"\n--- Calculating spatial FID (sFID) ---")
     print(f"Real images: {path_dataset}")
     print(f"Generated images: {path_generated}")
     
-    mu_real, sigma_real = compute_sfid_statistics(path_dataset, batch_size, device)
-    mu_gen, sigma_gen = compute_sfid_statistics(path_generated, batch_size, device)
+    # Inizializza la metrica sFID di pyiqa (scarica i pesi se necessario)
+    sfid_metric = pyiqa.create_metric('sfid', device=device)
     
-    sfid_value = calculate_frechet_distance(mu_real, sigma_real, mu_gen, sigma_gen)
-
+    # pyiqa accetta direttamente i path delle cartelle
+    print("Extracting features and computing sFID...")
+    sfid_score_tensor = sfid_metric(path_dataset, path_generated)
+    sfid_value = sfid_score_tensor.item()
+    
     print(f"spatial FID (sFID) SCORE: {sfid_value:.4f}")
-
     return sfid_value
 
 
@@ -213,7 +155,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--model_id", type=str ,required=True, help="Model id (required)")
     parser.add_argument("-pd", "--path_dataset", type=str, required=True, help="Path to dataset ImageNet (also where the download is placed)")
-    parser.add_argument("-pg", "--path_generated", type=str, required=True, default=20, help="Path to generated imaged")
+    parser.add_argument("-pg", "--path_generated", type=str, required=True, help="Path to generated imaged")
     parser.add_argument("-d", "--download", action="store_true", help="Download the images if activated")
     parser.add_argument("-bs", "--batch_size", type=int, required=False, default=1, help="Batch size")
 
@@ -225,27 +167,21 @@ if __name__ == "__main__":
     download = args.download
     batch_size = args.batch_size
 
-    json_path = f"../json/{model_id}.json"
-    assert(os.path.exists(json_path)),"The model doesnt have a json to save the scores"
+    json_path = f"json/{model_id}.json"
+    if not os.path.exists(json_path):
+        json_path = "../" + json_path
+
+    assert(os.path.exists(json_path)),f"The model doesn't have a json to save the scores at {json_path}"
 
     if download:
         download_imagenet_val(path_dataset)
-
-
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    fid_score = compute_fid(
-        path_dataset,
-        path_generated,
-        batch_size,
-        device
-    )
-
+    fid_score = compute_fid(path_dataset, path_generated, batch_size, device)
     is_mean, is_std = calculate_inception_score(path_generated, batch_size, device)
     sfid_score = calculate_sfid(path_dataset, path_generated, batch_size, device)
-
-
+    
     # Statistic saving
     with open(json_path, "r") as J:
         json_file = json.load(J)
@@ -259,5 +195,3 @@ if __name__ == "__main__":
 
     with open(json_path, "w") as J:
         json.dump(json_file,J,indent=4)
-
-

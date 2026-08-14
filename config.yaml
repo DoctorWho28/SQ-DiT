@@ -1,5 +1,5 @@
 epoch: 10
-class_n: 1
+class_n: 3
 bits_int: 4
 bits_ext: 8
 bits_act: 8
@@ -9,6 +9,6 @@ window_step: 1
 gamma: 0.5
 rank: 16
 group_size: 128
-layer_shallow: 4
-layer_deep: 4
+layer_shallow: 3
+layer_deep: 2
 inference_step: 20

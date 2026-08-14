@@ -1,0 +1,8 @@
+{
+    "quantization": {
+        "time": 4862.478299379349,
+        "vram_quant_model": 1.345597267150879,
+        "vram_max_quant": 3.607511520385742,
+        "model_size (MB)": 1003.2475709915161
+    }
+}

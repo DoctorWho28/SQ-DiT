@@ -66,6 +66,7 @@ Window 4 - Epoch 1/10 completata | Loss Media: 506961.617910
 -TODO:
     - Controllare come gestire il caso in cui i bit siano 16
     - Per loggare tutte le informazioni usare gen fid images con un tracker
+    - Settare l'assert per quanto riguarda i bit.
 
 
 Ordine delle cose da runnare:
@@ -75,3 +76,6 @@ Ordine delle cose da runnare:
 
 Per creare solo un'immagine:
     - inference
+
+Informazione importantissima: il modello "facebook/DiT-XL-2-256" di base è a 32 bit, siamo noi che lo convertiamo in FP16 quando lo carichiamo. Quindi i 3 GB di spazio occupato fisicamente sono del modello a 32 bit.
+Però al giorno d'oggi per l'inferenza, il fine-tuning e la quantizzazione è lo standard utilizzare 16 bit, tranne in casi particolari in cui si vuole sfruttare al massimo la memoria.

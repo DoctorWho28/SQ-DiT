@@ -97,7 +97,11 @@ if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-    model_dir = f"../output/{model_id}"
+    model_dir = f"output/{model_id}"
+    
+    if not os.path.exists(model_dir):
+        model_dir = "../" + model_dir
+
 
     print(f"Loading pipeline for {model_id}...")
     if os.path.exists(model_dir):
@@ -117,15 +121,19 @@ if __name__ == "__main__":
         image_num
     )
 
-
+    if img_generated == 0:
+        exit(1)
     # Statistic saving
-    json_path = f"../json/{model_id}.json"
+    json_path = f"json/{model_id}.json"
+
+    if not os.path.exists(json_path):
+        json_path = "../" + json_path
 
     with open(json_path, "r") as J:
         json_file = json.load(J)
 
     json_file["generation"] = {
-        "mean_time": total_time/img_generated,
+        "mean_time": (total_time / img_generated),
         "RAM": 1000 #TODO
         }
 
