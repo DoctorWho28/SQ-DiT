@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import DiTPipeline
 
-SKIP_NAMES = ["norm1", "emb"] 
+SKIP_NAMES = ["pos_embed", "proj_out", "x_embedder", "t_embedder", "emb"]
 
 class RoundSTE(torch.autograd.Function):
     @staticmethod
@@ -29,7 +29,7 @@ def pack_weights_to_intX(quantized_weights: torch.Tensor, bits: int) -> torch.Te
         assert quantized_weights.shape[-1] % 2 == 0, "Packing Error: Weight dimension must be even for int4 packing."
         even = quantized_weights[..., 0::2]
         odd = quantized_weights[..., 1::2]
-        return (odd << 4) | even
+        return ((odd << 4) | even).to(torch.uint8)
         
     elif bits == 2:
         assert quantized_weights.shape[-1] % 4 == 0, "Packing Error: Weight dimension must be multiple of 4 for int2 packing."
@@ -37,7 +37,7 @@ def pack_weights_to_intX(quantized_weights: torch.Tensor, bits: int) -> torch.Te
         b1 = quantized_weights[..., 1::4]
         b2 = quantized_weights[..., 2::4]
         b3 = quantized_weights[..., 3::4]
-        return (b3 << 6) | (b2 << 4) | (b1 << 2) | b0
+        return ((b3 << 6) | (b2 << 4) | (b1 << 2) | b0).to(torch.uint8)
         
     else:
         raise ValueError(f"Packing Error: {bits} bits not implemented, use 2, 4 or 8 bits")
@@ -121,7 +121,7 @@ class WXAXLinear(nn.Module):
         self.register_buffer("scales", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
         self.register_buffer("zeros", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
         
-        if bias is not None:
+        if bias:
             self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
         else:
             self.bias = None
@@ -205,20 +205,25 @@ class SliderQuantLinear(nn.Module):
             out = F.linear(x_scaled, w_adjusted, bias_f32)
         return out.to(orig_dtype)
 
-def replace_linears_with_sliderquant(module: nn.Module, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int, skip_names: list[str]) -> list[nn.Module]:
+def replace_linears_with_sliderquant(module: nn.Module, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int, skip_names: list[str], path: str = "") -> list[nn.Module]:
     replaced_modules = []
     for name, child in module.named_children():
-        if any(skip in name for skip in skip_names):
+        full_name = f"{path}.{name}" if path else name
+        if any(skip == name for skip in skip_names):
+            print(f"Skipping Layer {name} with full path {full_name}")
             continue
             
         if isinstance(child, nn.Linear):
-            sq_linear = SliderQuantLinear(child, weight_bits=weight_bits, bits_act=bits_act, rank=rank, gamma=gamma, group_size=group_size)
-            setattr(module, name, sq_linear)
-            replaced_modules.append(sq_linear)
+            if child.in_features % group_size == 0:
+                # Forza AdaLN a 8-bit se ci troviamo dentro norm1, altrimenti usa il weight_bits del layer
+                current_weight_bits = 8 if "norm1" in full_name else weight_bits
+                sq_linear = SliderQuantLinear(child, weight_bits=current_weight_bits, bits_act=bits_act, rank=rank, gamma=gamma, group_size=group_size)
+                setattr(module, name, sq_linear)
+                replaced_modules.append(sq_linear)
         elif isinstance(child, SliderQuantLinear):
             replaced_modules.append(child)
-        else:
-            replaced_modules.extend(replace_linears_with_sliderquant(child, weight_bits, bits_act, rank, gamma, group_size, skip_names))
+        elif not isinstance(child, nn.LayerNorm):
+            replaced_modules.extend(replace_linears_with_sliderquant(child, weight_bits, bits_act, rank, gamma, group_size, skip_names, full_name))
     return replaced_modules
 
 def merge_and_pack_linears(module: nn.Module) -> None:
@@ -286,7 +291,7 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
                     
 
 
-def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, bits_act: int, rank: int, group_size: int, batch_size: int) -> DiTPipeline:
+def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, bits_act: int, rank: int, group_size: int, batch_size: int, use_batch_stacking: bool = True) -> DiTPipeline:
     latents_x0 = torch.randn((batch_size, 4, 32, 32), device=device, dtype=torch.float16)
     class_steps = int(1000/class_num)
     class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)][:class_num]
@@ -356,26 +361,68 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                             
                         window_inputs_cache[(c_val.item(), t_value)] = latents_copy.detach().half()
 
-            for current_epoch in tqdm(range(epoch_num), desc=f"Phase {g_id+1} of 2 with gamma= {g}", position=1, leave=False):
+            # Pre-stack per class to avoid overhead inside epoch loop if requested
+            if use_batch_stacking:
+                class_batches = {}
+                with torch.no_grad():
+                    for c_val in class_id:
+                        inputs_list = []
+                        targets_list = []
+                        t_list = []
+                        c_list = []
+                        c_batch = torch.tensor([c_val.item()] * batch_size, device=device)
+                        for t in timesteps:
+                            t_value = t.item()
+                            inputs_list.append(window_inputs_cache[(c_val.item(), t_value)])
+                            targets_list.append(original_outputs[(c_val.item(), t_value, window[-1])])
+                            t_list.append(torch.tensor([t.item()] * batch_size, device=device, dtype=torch.float32))
+                            c_list.append(c_batch)
+                        
+                        class_batches[c_val.item()] = {
+                            "inputs": torch.cat(inputs_list, dim=0).float(),
+                            "targets": torch.cat(targets_list, dim=0).float(),
+                            "t": torch.cat(t_list, dim=0),
+                            "c": torch.cat(c_list, dim=0)
+                        }
+
+            for current_epoch in tqdm(range(epoch_num), desc=f"Phase {g_id+1} of 2 with gamma = {g}", position=1, leave=False):
                 optimizer.zero_grad()
                 epoch_loss = 0 
-                for c_val in class_id:
-                    c = torch.tensor([c_val.item()] * batch_size, device=device)
-                    for t_id, t in enumerate(timesteps):
-                        t_value = t.item()
-                        latents_copy = window_inputs_cache[(c_val.item(), t_value)].clone().float()
-
+                
+                if use_batch_stacking:
+                    for c_val in class_id:
+                        batch_data = class_batches[c_val.item()]
+                        latents_copy = batch_data["inputs"].to(device)
+                        targets = batch_data["targets"].to(device)
+                        t_tensor = batch_data["t"].to(device)
+                        c_tensor = batch_data["c"].to(device)
+                        
                         for layer_id in window:
                             layer = pipe.transformer.transformer_blocks[layer_id]
-                            t_tensor = torch.tensor([t.item()] * batch_size, device=device, dtype=torch.float32)
-                            latents_copy = layer(latents_copy, timestep=t_tensor, class_labels=c)
-                    
-                        target_output = original_outputs[(c_val.item(), t_value, window[-1])].to(device)
+                            latents_copy = layer(latents_copy, timestep=t_tensor, class_labels=c_tensor)
                         
-                        loss = F.mse_loss(latents_copy.float(), target_output.float())
-                        scaled_loss = loss / len(timesteps)
-                        scaled_loss.backward()
-                        epoch_loss += loss.item()
+                        loss = F.mse_loss(latents_copy, targets)
+                        loss.backward()
+                        
+                        epoch_loss += loss.item() * len(timesteps)
+                else:
+                    for c_val in class_id:
+                        c_tensor = torch.tensor([c_val.item()] * batch_size, device=device)
+                        for t in timesteps:
+                            t_value = t.item()
+                            latents_copy = window_inputs_cache[(c_val.item(), t_value)].clone().float().to(device)
+                            targets = original_outputs[(c_val.item(), t_value, window[-1])].float().to(device)
+                            t_tensor = torch.tensor([t.item()] * batch_size, device=device, dtype=torch.float32)
+                            
+                            for layer_id in window:
+                                layer = pipe.transformer.transformer_blocks[layer_id]
+                                latents_copy = layer(latents_copy, timestep=t_tensor, class_labels=c_tensor)
+                            
+                            loss = F.mse_loss(latents_copy, targets)
+                            scaled_loss = loss / len(timesteps)
+                            scaled_loss.backward()
+                            
+                            epoch_loss += loss.item()
                 
                 print(f"    Window {window_id} - Epoch {current_epoch+1}/{epoch_num} completed | Average Loss: {epoch_loss/class_num:.6f}")
                 torch.nn.utils.clip_grad_norm_(opt_parameters, max_norm=1.0)

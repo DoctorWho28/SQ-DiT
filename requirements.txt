@@ -1,0 +1,16 @@
+tqdm
+huggingface_hub
+python-dotenv
+torch-fidelity
+scipy<1.14.0
+diffusers
+safetensors
+pyyaml
+Pillow
+numpy
+scipy
+datasets
+pytorch-fid
+torchmetrics
+pyiqa
+clip-mmd

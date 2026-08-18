@@ -31,20 +31,36 @@ def track_info():
         info["vram"] = 0.0
 
 
-def save_json_info(total_info: list[dict], model_id: str, calc_final: bool = False):
+def save_json_info(total_info: list[dict], model_id: str, calc_final: bool = False, batch_size: int = None, image_num: int = None):
     json_path = f"json/{model_id}.json"
 
-    if not os.path.exists(json_path):
-        json_path = "../" + json_path
+    # Creiamo la cartella se non esiste, in caso il modello contenga uno slash (es: facebook/DiT...)
+    os.makedirs(os.path.dirname(json_path), exist_ok=True)
 
-    with open(json_path, "r") as J:
-        json_file = json.load(J)
+    if not os.path.exists(json_path):
+        # Se anche cercando indietro non esiste, inizializziamo un dizionario vuoto
+        if os.path.exists("../" + json_path):
+            json_path = "../" + json_path
+            with open(json_path, "r") as J:
+                json_file = json.load(J)
+        else:
+            json_file = {}
+    else:
+        with open(json_path, "r") as J:
+            json_file = json.load(J)
 
     if "generation" not in json_file:
         json_file["generation"] = {
             "mean_time": 0,
             "vram_max": 0,
+            "batch_size": batch_size,
+            "image_num_per_class": image_num,
             "single_values": []}
+
+    if batch_size is not None:
+        json_file["generation"]["batch_size"] = batch_size
+    if image_num is not None:
+        json_file["generation"]["image_num_per_class"] = image_num
 
     json_file["generation"]["single_values"] += total_info 
 
@@ -70,67 +86,64 @@ def generate_fid_images(pipe: DiTPipeline,
         pipe.safety_checker = None
 
     output_dir = f"FID_images/{model_id}"
-
-    generator = torch.Generator(device=device)
     total_classes = 1000
-    
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Starting generation of {total_classes * images_per_class} images in '{output_dir}'...")
-    print(f"Batch size: {batch_size}. This operation will take several hours.")
-    print("Note: The script supports RESUME. If interrupted, it will resume from where it stopped by skipping already generated images.")
+    print(f"Batch size: {batch_size}. Sfruttamento totale della GPU attivato!")
+    print("Note: The script supports RESUME. If interrupted, it will resume from where it stopped.")
+
+    # 1. Raccogliamo tutte le immagini mancanti
+    pending_tasks = []
+    for class_id in range(total_classes):
+        for i in range(images_per_class):
+            if not os.path.exists(os.path.join(output_dir, f"class_{class_id:03d}_img_{i:02d}.png")):
+                pending_tasks.append((class_id, i))
+
+    if not pending_tasks:
+        print("\nTutte le immagini sono già state generate!")
+        return []
+
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed)
 
     total_info = []
-    image_before_save = SAVE_STOP
+    image_before_save = SAVE_STEP
     
     with tqdm(total=total_classes * images_per_class, desc="FID Generation") as pbar:
-        for class_id in range(total_classes):
+        # Avanza la barra per le immagini che saltiamo (già esistenti)
+        pbar.update((total_classes * images_per_class) - len(pending_tasks))
+        
+        # 2. Processiamo tutto a blocchi pieni da 'batch_size'
+        for i in range(0, len(pending_tasks), batch_size):
+            chunk = pending_tasks[i : i + batch_size]
+            class_labels = [task[0] for task in chunk]
             
-            existing_images = 0
-            for i in range(images_per_class):
-                if os.path.exists(os.path.join(output_dir, f"class_{class_id:03d}_img_{i:02d}.png")):
-                    existing_images += 1
-            
-            pbar.update(existing_images)
-            images_to_generate = images_per_class - existing_images
-            
-            if images_to_generate <= 0:
-                continue
+            with track_info() as info:
+                output = pipe(
+                    class_labels=class_labels,
+                    generator=generator,
+                    num_inference_steps=inference_step
+                )
+
+            total_info.append(info)
+
+            # Salvataggio json periodico
+            image_before_save -= len(chunk)
+            if image_before_save <= 0:
+                save_json_info(total_info, model_id, batch_size=batch_size, image_num=images_per_class)
+                image_before_save = SAVE_STEP
+                total_info = []
+
+            # Salvataggio immagini su disco
+            for idx, img in enumerate(output.images):
+                class_id, img_idx = chunk[idx]
+                img_name = f"class_{class_id:03d}_img_{img_idx:02d}.png"
+                img.save(os.path.join(output_dir, img_name))
                 
-            generator.manual_seed(seed + class_id)
-            
-            current_idx = existing_images
-            while images_to_generate > 0:
-                current_batch = min(batch_size, images_to_generate)
-                class_labels = [class_id] * current_batch
-
-                
-                with track_info() as info:
-                    output = pipe(
-                        class_labels=class_labels,
-                        generator=generator,
-                        num_inference_steps=inference_step
-                    )
-
-                total_info.append(info)
-
-                image_before_save -= current_batch
-                if image_before_save <= 0:
-                    save_json_info(total_info,model_id)
-                    image_before_save = SAVE_STEP
-                    total_info = []
-
-                
-                for img in output.images:
-                    img_name = f"class_{class_id:03d}_img_{current_idx:02d}.png"
-                    img.save(os.path.join(output_dir, img_name))
-                    current_idx += 1
-                    
-                images_to_generate -= current_batch
-                pbar.update(current_batch)
+            pbar.update(len(chunk))
 
     print(f"\nGeneration of {total_classes * images_per_class} images completed successfully!")
-
     return total_info
 
 if __name__ == "__main__":
@@ -166,6 +179,8 @@ if __name__ == "__main__":
     else:
         pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
         pipe = pipe.to(device)
+        
+    pipe.set_progress_bar_config(disable=True)
     
     total_info = generate_fid_images(
         pipe,
@@ -178,4 +193,4 @@ if __name__ == "__main__":
     )
 
 
-    save_json_info(total_info,model_id,calc_final=True)
+    save_json_info(total_info, model_id, calc_final=True, batch_size=batch_size, image_num=image_num)

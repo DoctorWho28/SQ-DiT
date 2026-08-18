@@ -56,15 +56,18 @@ def load_quantized_pipeline(
     
     print(f"Injecting mixed WXAX layers...")
     
-    def inject_wXax(module, weight_bits, bits_act):
+    def inject_wXax(module, weight_bits, bits_act, path=""):
         for name, child in module.named_children():
-            if any(skip in name for skip in SKIP_NAMES):
+            full_name = f"{path}.{name}" if path else name
+            if any(skip == name for skip in SKIP_NAMES):
                 continue
+            
             if isinstance(child, nn.Linear):
-                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=weight_bits, bits_act=bits_act, bias=(child.bias is not None))
+                current_weight_bits = 8 if "norm1" in full_name else weight_bits
+                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=current_weight_bits, bits_act=bits_act, bias=(child.bias is not None))
                 setattr(module, name, wX)
-            else:
-                inject_wXax(child, weight_bits, bits_act)
+            elif not isinstance(child, nn.LayerNorm):
+                inject_wXax(child, weight_bits, bits_act, full_name)
                 
     # Shallow Injection
     for layer_id in range(layer_shallow):
@@ -96,6 +99,73 @@ def gen_quant_image(quant_dir: str, class_label: list[int], device: str, seed: i
     output.images[0].save(f"quantized_image_seed_{seed}.png")
     print(f"Image saved as 'quantized_image_seed_{seed}.png'")
 
+def load_quantized_pipeline_old(
+    quant_dir: str,
+    device: str
+) -> DiTPipeline:
+    if not os.path.exists(quant_dir):
+        raise FileNotFoundError(f"Quantized model directory not found: {quant_dir}")
+        
+    config_path = os.path.join(quant_dir, "quantization_config.json")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration not found: {config_path}")
+        
+    with open(config_path, "r") as f:
+        q_config = json.load(f)
+        
+    layer_shallow = q_config.get("layer_shallow")
+    layer_deep = q_config.get("layer_deep")
+    group_size = q_config.get("group_size")
+    bits_int = q_config.get("bits_int")
+    bits_ext = q_config.get("bits_ext")
+    bits_act = q_config.get("bits_act")
+    inference_step = q_config.get("inference_step")
+
+    index_path = os.path.join(quant_dir, "model_index.json")
+    with open(index_path, "r") as f:
+        model_index = json.load(f)
+    
+    base_model_id = model_index.get("_name_or_path")
+    pipe = DiTPipeline.from_pretrained(base_model_id, torch_dtype=torch.float16)
+    layer_int = len(pipe.transformer.transformer_blocks) - layer_shallow - layer_deep
+    
+    old_skip_names = ["norm1", "emb"]
+    
+    def inject_wXax(module, weight_bits, bits_act):
+        for name, child in module.named_children():
+            if any(skip in name for skip in old_skip_names):
+                continue
+            if isinstance(child, nn.Linear):
+                wX = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=weight_bits, bits_act=bits_act, bias=(child.bias is not None))
+                setattr(module, name, wX)
+            else:
+                inject_wXax(child, weight_bits, bits_act)
+                
+    for layer_id in range(layer_shallow):
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, bits_act=bits_act)
+    for layer_id in range(layer_shallow, layer_shallow + layer_int):
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_int, bits_act=bits_act)
+    for layer_id in range(layer_shallow + layer_int, len(pipe.transformer.transformer_blocks)):
+        inject_wXax(pipe.transformer.transformer_blocks[layer_id], weight_bits=bits_ext, bits_act=bits_act)
+        
+    transformer_state_dict = load_file(os.path.join(quant_dir, "transformer", "diffusion_pytorch_model.safetensors"))
+    pipe.transformer.load_state_dict(transformer_state_dict, strict=True)
+    pipe = pipe.to(device)
+    return pipe, inference_step
+
+def gen_quant_image_old(quant_dir: str, class_label: list[int], device: str, seed: int | None = None):
+    pipe, inference_step = load_quantized_pipeline_old(quant_dir, device)
+
+    if seed is None:
+        seed = random.randint(0, 10000)
+    
+    generator = torch.Generator(device=device).manual_seed(seed)
+    
+    print("Generating test image (old method)...")
+    output = pipe(class_labels=class_label, generator=generator, num_inference_steps=inference_step)
+    output.images[0].save(f"quantized_image_old_seed_{seed}.png")
+    print(f"Image saved as 'quantized_image_old_seed_{seed}.png'")
+
 def gen_orig_image(model_id: str, inference_step: int, class_label: list[int], device: str, seed: int | None = None):
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
     pipe = pipe.to(device)
@@ -117,12 +187,16 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--inference_steps", type=int, default=20, help="Number of inference steps (required for original model)")
     parser.add_argument("-c", "--class_label", type=int, default=19, help="Class label to generate (default: 19)")
     parser.add_argument("-s", "--seed", type=int, default=None, help="Random seed (default: random)")
+    parser.add_argument("--old_method", action="store_true", help="Use the old injection method for older checkpoints")
     
     args = parser.parse_args()
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
     if args.quant_dir:
-        gen_quant_image(args.quant_dir, [args.class_label], device, seed=args.seed)
+        if args.old_method:
+            gen_quant_image_old(args.quant_dir, [args.class_label], device, seed=args.seed)
+        else:
+            gen_quant_image(args.quant_dir, [args.class_label], device, seed=args.seed)
     if args.model:
         gen_orig_image(args.model, args.inference_steps, [args.class_label], device, seed=args.seed)

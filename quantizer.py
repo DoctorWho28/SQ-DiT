@@ -135,6 +135,8 @@ if __name__== "__main__":
     inference_step = config.get('inference_step', 20)
     assert(inference_step>0 and inference_step<=1000),"Inference step must be in range [1,1000]"
     
+    use_batch_stacking = config.get('use_batch_stacking', True)
+    
     model_id_safe = model_id.replace("/", "_")
     sys.stdout = BufferedFileLogger(f"log_quantization_{model_id_safe}_W{bits_int}_A{bits_act}.txt", buffer_kb=8)
     
@@ -159,7 +161,7 @@ if __name__== "__main__":
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
     
     with track_info("Quantization") as info:
-        pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, bits_act, rank, group_size, batch_size)
+        pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, bits_act, rank, group_size, batch_size, use_batch_stacking)
 
     # Save the quantized model
     base_out_dir = f"output/{model_id}-W{bits_int}A{bits_act}"
@@ -191,14 +193,21 @@ if __name__== "__main__":
 
 
     # JSON of data
-    json_path = f"json/{os.path.basename(out_dir)}.json"
+    json_path = f"json/{model_id}-W{bits_int}A{bits_act}.json"
     os.makedirs(os.path.dirname(json_path), exist_ok=True)
 
-    json_file = {"quantization":{
+    if os.path.exists(json_path):
+        with open(json_path, "r") as J:
+            json_file = json.load(J)
+    else:
+        json_file = {}
+
+    json_file["quantization"] = {
         "time": info["time"],
         "vram_quant_model": info["vram_end"],
         "vram_max_quant": info["vram_peak"],
-        "model_size (MB)": model_size}}
+        "model_size (MB)": model_size
+    }
 
-    with open(json_path,"w") as J:
-        json.dump(json_file,J,indent=4)
+    with open(json_path, "w") as J:
+        json.dump(json_file, J, indent=4)

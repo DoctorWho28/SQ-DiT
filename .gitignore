@@ -7,3 +7,5 @@ imagenet
 *.bat
 __pycache__
 log*.txt
+*_checkpoints
+plot*
