@@ -64,10 +64,8 @@ Nelle versioni iniziali (es. V3), la Loss esplodeva a valori anomali (es. 500.00
 - La maggior parte dei paper usa 10k immagini per il FiD e il resto.
 
 -TODO:
-    - Controllare come gestire il caso in cui i bit siano 16
-    - Settare l'assert per quanto riguarda i bit.
-    - Capire come gestire il running della quantizzazione e della generazione delle immagini
-    - Decidere i parametri da utilizzare per le varie fasi e quantizzazioni
+    - Iniziare report
+    - Ricalcolare pesi dei modelli (escludendo vae e scheduler), per l'originare considerare il modello a 16 bit
 
 
 Ordine delle cose da runnare:

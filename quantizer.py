@@ -52,31 +52,26 @@ def track_info(operation_name):
     if use_cuda:
         info["vram_end"] = torch.cuda.memory_allocated() / (1024**3)
         info["vram_peak"] = torch.cuda.max_memory_allocated() / (1024**3)
-        print(f"\n--- {operation_name} Info ---")
-        print(f"Time: {info['time']:.2f}s | VRAM End: {info['vram_end']:.2f} GB | VRAM Peak: {info['vram_peak']:.2f} GB")
     else:
         info["vram_end"] = 0.0
         info["vram_peak"] = 0.0
-        print(f"\n--- {operation_name} Info ---")
-        print(f"Time: {info['time']:.2f}s | VRAM: N/A (CPU Mode)")
 
+
+# Log on file the print in the execution
 class BufferedFileLogger:
     def __init__(self, filename, buffer_kb=8):
-        # Apre il file in scrittura, specificando il buffer in byte
         self.log = open(filename, "w", encoding="utf-8", buffering=buffer_kb * 1024)
         
     def write(self, message):
-        # Scrive solo nel file, non più nel terminale
         self.log.write(message)
         
     def flush(self):
         self.log.flush()
 
 if __name__== "__main__":
-    
     parser = argparse.ArgumentParser()
-    parser.add_argument("-m", "--model", type=str ,required=True, help="Model name (required)")
-    parser.add_argument("-c", "--config", type=str, default="config.yaml", help="Path to config yaml")
+    parser.add_argument("-m", "--model", type=str ,required=True, help="Model name")
+    parser.add_argument("-c", "--config", type=str, default="yaml/default.yaml", help="Path to config yaml")
 
     args = parser.parse_args()
     model_id = args.model
@@ -98,14 +93,15 @@ if __name__== "__main__":
     class_num = config.get('class_n', 1)
     assert(class_num>0 and class_num<=1000),"Class num must be in range [1,1000]"
 
-    bits_int = config.get('bits_int', 4)
-    assert(bits_int > 0 and (bits_int & (bits_int - 1)) == 0),"Bits int must be a power of 2"
+    bits_low = config.get('bits_low', 4)
+    assert(bits_low >= 2 and bits_low < 16 and (bits_low & (bits_low - 1)) == 0),"Bits low must be a power of 2 (max 8)"
 
-    bits_ext = config.get('bits_ext', 8)
-    assert(bits_ext > 0 and (bits_ext & (bits_ext - 1)) == 0),"Bits ext must be a power of 2"
+    bits_high = config.get('bits_high', 8)
+    assert(bits_high >= 2 and bits_high <= 16 and (bits_high & (bits_high - 1)) == 0),"Bits high must be a power of 2 (max 16)"
+    assert(bits_low <= bits_high),"Bits low must be lower or equal to bits high"
 
     bits_act = config.get('bits_act', 8)
-    assert(bits_act > 0 and (bits_act & (bits_act - 1)) == 0),"Act bits must be a power of 2"
+    assert(bits_act >= 2 and bits_act <= 16 and (bits_act & (bits_act - 1)) == 0),"Act bits must be a power of 2 (max 16)"
 
     batch_size = config.get('batch_size', 4)
     assert(batch_size>0),"Batch size must be a positive number"
@@ -126,22 +122,22 @@ if __name__== "__main__":
     group_size = config.get('group_size', 128)
     assert(group_size>0),"Group size must be a positive number"
 
-    layer_shallow = config.get('layer_shallow', 4)
+    layer_shallow = config.get('layer_shallow', 3)
     assert(layer_shallow>=0),"Layer shallow must be a positive number or 0"
 
-    layer_deep = config.get('layer_deep', 4)
+    layer_deep = config.get('layer_deep', 2)
     assert(layer_deep>=0),"Layer deep must be a positive number or 0"
 
     inference_step = config.get('inference_step', 20)
     assert(inference_step>0 and inference_step<=1000),"Inference step must be in range [1,1000]"
     
-    use_batch_stacking = config.get('use_batch_stacking', True)
+    use_batch_stacking = config.get('use_batch_stacking', False)
     
     model_id_safe = model_id.replace("/", "_")
-    sys.stdout = BufferedFileLogger(f"log_quantization_{model_id_safe}_W{bits_int}_A{bits_act}.txt", buffer_kb=8)
+    sys.stdout = BufferedFileLogger(f"log_quantization_{model_id_safe}_W{bits_low}_A{bits_act}.txt", buffer_kb=8)
     
     print(f"Epochs: {epoch_num}")
-    print(f"Quantization: W{bits_int}A{bits_act} (Ext: W{bits_ext}A{bits_act})")
+    print(f"Quantization: W{bits_low}A{bits_act} (High: W{bits_high}A{bits_act})")
 
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -161,10 +157,10 @@ if __name__== "__main__":
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
     
     with track_info("Quantization") as info:
-        pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_int, bits_ext, bits_act, rank, group_size, batch_size, use_batch_stacking)
+        pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_low, bits_high, bits_act, rank, group_size, batch_size, use_batch_stacking)
 
     # Save the quantized model
-    base_out_dir = f"output/{model_id}-W{bits_int}A{bits_act}"
+    base_out_dir = f"output/{model_id}-W{bits_low}A{bits_act}"
     out_dir = base_out_dir
     id = 1
     while os.path.exists(out_dir):
@@ -184,16 +180,15 @@ if __name__== "__main__":
     print(f"Saved quantization config to {config_out_path}")
 
 
-    # Statistics saving
-
+    # Save the statistics
     def get_dir_size(path):
-            return sum(os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(path) for f in filenames)
+        return sum(os.path.getsize(os.path.join(dirpath, f)) for dirpath, _, filenames in os.walk(path) for f in filenames)
 
     model_size = get_dir_size(out_dir) / (1024**2)
 
 
     # JSON of data
-    json_path = f"json/{model_id}-W{bits_int}A{bits_act}.json"
+    json_path = f"json/{model_id}-W{bits_low}A{bits_act}.json"
     os.makedirs(os.path.dirname(json_path), exist_ok=True)
 
     if os.path.exists(json_path):

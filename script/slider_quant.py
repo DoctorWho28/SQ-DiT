@@ -4,7 +4,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import DiTPipeline
 
-SKIP_NAMES = ["pos_embed", "proj_out", "x_embedder", "t_embedder", "emb"]
+SKIP_NAMES = ["emb"]
+HIGH_NAMES = ["norm1"]
 
 class RoundSTE(torch.autograd.Function):
     @staticmethod
@@ -25,7 +26,7 @@ def pack_weights_to_intX(quantized_weights: torch.Tensor, bits: int) -> torch.Te
     if bits == 8:
         return quantized_weights
         
-    elif bits== 4:
+    elif bits == 4:
         assert quantized_weights.shape[-1] % 2 == 0, "Packing Error: Weight dimension must be even for int4 packing."
         even = quantized_weights[..., 0::2]
         odd = quantized_weights[..., 1::2]
@@ -68,15 +69,14 @@ def unpack_intX_weights(packed_weights: torch.Tensor, original_shape: tuple, bit
 
 def quantize_tensor(tensor: torch.Tensor, bits: int, group_size: int) -> torch.Tensor:
     '''
-    Group Quantization implementation.
-    Isolates outliers by dividing channels into small groups.
+    Quantize a tensor using group quantization
     '''
     if bits >= 16:
             return tensor
 
     if group_size != -1:
         original_shape = tensor.shape
-        assert original_shape[1] % group_size == 0, f"Group Quant Error: In-features {original_shape[1]} must be divisible by group_size {group_size}"
+        assert original_shape[1] % group_size == 0, f"Quant Error: In-features {original_shape[1]} must be divisible by group_size {group_size}"
         
         tensor = tensor.view(original_shape[0], original_shape[1] // group_size, group_size)
     
@@ -98,28 +98,32 @@ def quantize_tensor(tensor: torch.Tensor, bits: int, group_size: int) -> torch.T
 
     if group_size != -1:
         dequantized = dequantized.view(original_shape)
+    
     return dequantized
 
 class WXAXLinear(nn.Module):
     """
-    A dynamic WXAX linear layer (Weight-Activation Quantization). 
-    Stores weights physically packed as uint8 based on specified weight_bits (2, 4, 8).
-    At runtime, quantizes activations to bits_act, unpacks weights to fp16, scales, and computes linear.
+    A dynamic WXAX linear layer 
+    Stores weights physically packed as uint8 based on bits_weight
+    At runtime, quantizes activations to bits_act and unpacks weights to 16 bits
     """
-    def __init__(self, in_features: int, out_features: int, group_size: int, weight_bits: int, bits_act: int, bias: bool):
+    def __init__(self, in_features: int, out_features: int, group_size: int, bits_weight: int, bits_act: int, bias: bool):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.group_size = group_size
-        self.weight_bits = weight_bits
+        self.bits_weight = bits_weight
         self.bits_act = bits_act
-        
-        pack_factor = 8 // weight_bits
-        assert in_features % pack_factor == 0, f"in_features {in_features} not divisible by packing factor {pack_factor}"
-        
-        self.register_buffer("weight_packed", torch.zeros((out_features, in_features // pack_factor), dtype=torch.uint8))
-        self.register_buffer("scales", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
-        self.register_buffer("zeros", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
+
+        if bits_weight < 16:
+            pack_factor = 8 // bits_weight
+            assert in_features % pack_factor == 0, f"in_features {in_features} not divisible by packing factor {pack_factor}"
+            
+            self.register_buffer("weight_packed", torch.zeros((out_features, in_features // pack_factor), dtype=torch.uint8))
+            self.register_buffer("scales", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
+            self.register_buffer("zeros", torch.zeros((out_features, in_features // group_size, 1), dtype=torch.float16))
+        else:
+            self.register_buffer("weight_fp16", torch.zeros((out_features, in_features), dtype=torch.float16))
         
         if bias:
             self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
@@ -129,30 +133,34 @@ class WXAXLinear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Quantize activations dynamically token-wise
         x_quantized = quantize_tensor(x, self.bits_act, -1)
-        
-        # Unpack weights on the fly
-        unpacked_int = unpack_intX_weights(self.weight_packed, (self.out_features, self.in_features), self.weight_bits).half()
-        
-        # Reshape to group size
-        unpacked_grouped = unpacked_int.view(self.out_features, self.in_features // self.group_size, self.group_size)
-        
-        # Dequantize weights
-        dequantized_grouped = (unpacked_grouped + self.zeros) * self.scales
-        
-        # Flatten back
-        w_fp16 = dequantized_grouped.view(self.out_features, self.in_features)
+
+        if self.bits_weight < 16:
+            # Unpack weights on the fly
+            unpacked_int = unpack_intX_weights(self.weight_packed, (self.out_features, self.in_features), self.bits_weight).half()
+            
+            # Reshape to group size
+            unpacked_grouped = unpacked_int.view(self.out_features, self.in_features // self.group_size, self.group_size)
+            
+            # Dequantize weights
+            dequantized_grouped = (unpacked_grouped + self.zeros) * self.scales
+            
+            # Flatten back
+            w_fp16 = dequantized_grouped.view(self.out_features, self.in_features)
+        else:
+            w_fp16 = self.weight_fp16
         
         return F.linear(x_quantized.half(), w_fp16, self.bias)
 
 class SliderQuantLinear(nn.Module):
     """
-    Wrapper for Fake Quantization during training with dynamic weight and activation bits.
+    Custom Linear used during training with dynamic weight and activation bits
+    Contains also the parameters for optimization
     """
-    def __init__(self, original_linear: nn.Linear, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int):
+    def __init__(self, original_linear: nn.Linear, bits_weight: int, bits_act: int, rank: int, gamma: float, group_size: int):
         super().__init__()
         self.in_features = original_linear.in_features
         self.out_features = original_linear.out_features
-        self.weight_bits = weight_bits
+        self.bits_weight = bits_weight
         self.bits_act = bits_act
         self.rank = rank
         self.gamma = gamma
@@ -189,7 +197,7 @@ class SliderQuantLinear(nn.Module):
         bias_f32 = self.bias.float() if self.bias is not None else None
         
         if limit_row > 0:
-            w_quant_part = quantize_tensor(w_adjusted[:limit_row, :], self.weight_bits, self.group_size)
+            w_quant_part = quantize_tensor(w_adjusted[:limit_row, :], self.bits_weight, self.group_size)
             bias_quant = bias_f32[:limit_row] if bias_f32 is not None else None
             
             out_quant = F.linear(x_quantized, w_quant_part, bias_quant)
@@ -205,25 +213,25 @@ class SliderQuantLinear(nn.Module):
             out = F.linear(x_scaled, w_adjusted, bias_f32)
         return out.to(orig_dtype)
 
-def replace_linears_with_sliderquant(module: nn.Module, weight_bits: int, bits_act: int, rank: int, gamma: float, group_size: int, skip_names: list[str], path: str = "") -> list[nn.Module]:
+def replace_linears_with_sliderquant(module: nn.Module, bits_weight_low: int, bits_weight_high: int, bits_act: int, rank: int, gamma: float, group_size: int, path: str = "") -> list[nn.Module]:
     replaced_modules = []
     for name, child in module.named_children():
         full_name = f"{path}.{name}" if path else name
-        if any(skip == name for skip in skip_names):
-            print(f"Skipping Layer {name} with full path {full_name}")
+        if any(skip == name for skip in SKIP_NAMES):
             continue
             
         if isinstance(child, nn.Linear):
             if child.in_features % group_size == 0:
-                # Forza AdaLN a 8-bit se ci troviamo dentro norm1, altrimenti usa il weight_bits del layer
-                current_weight_bits = 8 if "norm1" in full_name else weight_bits
-                sq_linear = SliderQuantLinear(child, weight_bits=current_weight_bits, bits_act=bits_act, rank=rank, gamma=gamma, group_size=group_size)
+                current_bits_weight = bits_weight_low
+                if any(high in full_name for high in HIGH_NAMES):
+                    current_bits_weight = bits_weight_high
+                sq_linear = SliderQuantLinear(child, bits_weight=current_bits_weight, bits_act=bits_act, rank=rank, gamma=gamma, group_size=group_size)
                 setattr(module, name, sq_linear)
                 replaced_modules.append(sq_linear)
         elif isinstance(child, SliderQuantLinear):
             replaced_modules.append(child)
         elif not isinstance(child, nn.LayerNorm):
-            replaced_modules.extend(replace_linears_with_sliderquant(child, weight_bits, bits_act, rank, gamma, group_size, skip_names, full_name))
+            replaced_modules.extend(replace_linears_with_sliderquant(child, bits_weight_low, bits_weight_high, bits_act, rank, gamma, group_size, full_name))
     return replaced_modules
 
 def merge_and_pack_linears(module: nn.Module) -> None:
@@ -235,7 +243,7 @@ def merge_and_pack_linears(module: nn.Module) -> None:
                 
                 w_final_merged = w_adjusted / safe_alpha.view(1, -1)
                 
-                qmax = (2 ** child.weight_bits) - 1
+                qmax = (2 ** child.bits_weight) - 1
                 group_size = child.group_size
                 tensor_grouped = w_final_merged.view(child.out_features, child.in_features // group_size, group_size)
                 
@@ -250,16 +258,29 @@ def merge_and_pack_linears(module: nn.Module) -> None:
                 
                 # Flatten the quantized weights
                 quantized_flat = quantized.view(child.out_features, child.in_features)
+
+                if child.bits_weight >= 16:
+                    if child.bits_act >= 16:
+                        real_int_linear = nn.Linear(child.in_features, child.out_features, bias=(child.bias is not None))
+                        real_int_linear.weight.data.copy_(w_final_merged.half())
+                        if child.bias is not None:
+                            real_int_linear.bias.data.copy_(child.bias.half())
+                        real_int_linear = real_int_linear.half()
+                    else:
+                        real_int_linear = WXAXLinear(child.in_features, child.out_features, group_size, child.bits_weight, child.bits_act, bias=(child.bias is not None))
+                        real_int_linear.weight_fp16.copy_(w_final_merged.half())
+                        if child.bias is not None:
+                            real_int_linear.bias.copy_(child.bias.half())
+                else:
                 
-                # Create True Integer Packed layer dynamically
-                real_int_linear = WXAXLinear(child.in_features, child.out_features, group_size, weight_bits=child.weight_bits, bits_act=child.bits_act, bias=(child.bias is not None))
-                
-                real_int_linear.weight_packed.copy_(pack_weights_to_intX(quantized_flat, child.weight_bits))
-                real_int_linear.scales.copy_(safe_alpha_group.half())
-                real_int_linear.zeros.copy_(beta.half())
-                
-                if child.bias is not None:
-                    real_int_linear.bias.copy_(child.bias.half())
+                    real_int_linear = WXAXLinear(child.in_features, child.out_features, group_size, child.bits_weight, child.bits_act, bias=(child.bias is not None))
+                    
+                    real_int_linear.weight_packed.copy_(pack_weights_to_intX(quantized_flat, child.bits_weight))
+                    real_int_linear.scales.copy_(safe_alpha_group.half())
+                    real_int_linear.zeros.copy_(beta.half())
+                    
+                    if child.bias is not None:
+                        real_int_linear.bias.copy_(child.bias.half())
                 
             setattr(module, name, real_int_linear)
             
@@ -268,7 +289,7 @@ def merge_and_pack_linears(module: nn.Module) -> None:
 
 
 
-def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_id: list[torch.Tensor], timestep_hidden_states: dict, batch_size: int) -> dict[ str, dict[str, dict[str, torch.Tensor]]]:
+def calc_original_outputs(pipe: DiTPipeline, timesteps: list[torch.Tensor], class_id: list[torch.Tensor], timestep_hidden_states: dict, batch_size: int) -> dict[tuple, torch.Tensor]:
     original_outputs = {} 
     
     with torch.no_grad():
@@ -291,7 +312,8 @@ def calc_original_outputs(pipe: DiTPipeline,timesteps: list[torch.Tensor],class_
                     
 
 
-def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float,epoch_num: int,class_num: int,bits_int: int,bits_ext: int, bits_act: int, rank: int, group_size: int, batch_size: int, use_batch_stacking: bool = True) -> DiTPipeline:
+def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor], window_list: list, layer_shallow: int, layer_int: int, gamma: float, epoch_num: int,class_num: int, bits_low: int, bits_high: int, bits_act: int, rank: int, group_size: int, batch_size: int, use_batch_stacking: bool) -> DiTPipeline:
+
     latents_x0 = torch.randn((batch_size, 4, 32, 32), device=device, dtype=torch.float16)
     class_steps = int(1000/class_num)
     class_id = [torch.tensor([i],device=device) for i in range(0,1000,class_steps)][:class_num]
@@ -309,7 +331,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     
     # === STAGE: WINDOW DISTILLATION ===
     print("=== STAGE: WINDOW DISTILLATION ===")
-    for window_id, window in tqdm(enumerate(window_list), "windows quantization", position = 0, total= len(window_list)):
+    for window_id, window in tqdm(enumerate(window_list), desc="windows quantization", position = 0, total=len(window_list)):
         print(f"===================================")
         print(f"Window {window_id}/{len(window_list)-1}: {window}")
         linear_modules = []
@@ -318,13 +340,17 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
         for layer_id in window:
             layer_module = pipe.transformer.transformer_blocks[layer_id]
             layer_module.float()
+
+            
             
             if layer_id < layer_shallow or layer_id >= (layer_shallow + layer_int):
-                print(f"Layer {layer_id}: SHALLOW/DEEP -> Quantized W{bits_ext}A{bits_act}")
-                linear_modules += replace_linears_with_sliderquant(layer_module, bits_ext, bits_act, rank, gamma, group_size, SKIP_NAMES)
+                if bits_high == 16:
+                    continue
+                print(f"Layer {layer_id}: SHALLOW/DEEP -> Quantized W{bits_high}A{bits_act}")
+                linear_modules += replace_linears_with_sliderquant(layer_module, bits_high, bits_high, bits_act, rank, gamma, group_size)
             else:
-                print(f"Layer {layer_id}: INTERMEDIATE -> Quantized W{bits_int}A{bits_act}")
-                linear_modules += replace_linears_with_sliderquant(layer_module, bits_int, bits_act, rank, gamma, group_size, SKIP_NAMES)
+                print(f"Layer {layer_id}: INTERMEDIATE -> Quantized W{bits_low}A{bits_act}")
+                linear_modules += replace_linears_with_sliderquant(layer_module, bits_low, bits_high, bits_act, rank, gamma, group_size)
 
         for sq_mod in linear_modules:
             if isinstance(sq_mod, SliderQuantLinear):
@@ -425,6 +451,7 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
                             epoch_loss += loss.item()
                 
                 print(f"    Window {window_id} - Epoch {current_epoch+1}/{epoch_num} completed | Average Loss: {epoch_loss/class_num:.6f}")
+
                 torch.nn.utils.clip_grad_norm_(opt_parameters, max_norm=1.0)
                 optimizer.step()
 
@@ -435,6 +462,3 @@ def apply_sliderquant(pipe: DiTPipeline,device: str,timesteps: list[torch.Tensor
     merge_and_pack_linears(pipe.transformer)
 
     return pipe
-
-if __name__=="__main__":
-    pass

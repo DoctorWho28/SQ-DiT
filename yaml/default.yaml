@@ -1,5 +1,5 @@
-epoch: 1
-class_n: 1
+epoch: 30
+class_n: 20
 bits_int: 4
 bits_ext: 8
 bits_act: 8
@@ -11,6 +11,5 @@ rank: 16
 group_size: 128
 layer_shallow: 3
 layer_deep: 2
-
 use_batch_stacking: false
 inference_step: 20

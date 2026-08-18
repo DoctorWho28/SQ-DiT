@@ -1,0 +1,15 @@
+epoch: 30
+class_n: 20
+bits_int: 8
+bits_ext: 8
+bits_act: 8
+batch_size: 4
+window_size: 2
+window_step: 1
+gamma: 0.5
+rank: 16
+group_size: 128
+layer_shallow: 3
+layer_deep: 2
+use_batch_stacking: false
+inference_step: 20

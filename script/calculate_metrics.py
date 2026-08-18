@@ -3,35 +3,45 @@ from dotenv import load_dotenv
 import json
 import argparse
 import torch
+import random
 import torchvision.transforms as TF
 from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
-import numpy as np
-from scipy import linalg
 from datasets import load_dataset
 import pytorch_fid.fid_score
-from pytorch_fid.inception import InceptionV3
 from torchmetrics.image.inception import InceptionScore
 import pyiqa
 from clip_mmd import logic
+from inference import load_quantized_pipeline
+import contextlib
+import time
+
+@contextlib.contextmanager
+def track_info():
+    info = {}
+    use_cuda = torch.cuda.is_available()
+    
+    if use_cuda:
+        torch.cuda.reset_peak_memory_stats()
+        
+    start_time = time.time()
+    
+    yield info
+
+    info["time"] = time.time() - start_time
+    
+    if use_cuda:
+        info["vram"] = torch.cuda.max_memory_allocated() / (1024**3)
+    else:
+        info["vram"] = 0.0
+
+
+
+
 
 OriginalDataset = pytorch_fid.fid_score.ImagePathDataset
 
-class ResizingDataset(OriginalDataset):
-    def __init__(self, files, transforms=None):
-        super().__init__(files, transforms=transforms)
-        self.custom_transforms = TF.Compose([
-            TF.Resize(256, interpolation=TF.InterpolationMode.BICUBIC),
-            TF.CenterCrop(256),
-            TF.ToTensor()
-        ])
-
-    def __getitem__(self, i):
-        from PIL import Image
-        path = self.files[i]
-        img = Image.open(path).convert('RGB')
-        return self.custom_transforms(img)
 
 class ImageFolderDataset(Dataset):
     """Dataloader to load image from a folder"""
@@ -54,7 +64,6 @@ class ImageFolderDataset(Dataset):
         return img
 
 
-pytorch_fid.fid_score.ImagePathDataset = ResizingDataset
 
 def download_imagenet_val(output_dir: str):
     if os.path.exists(output_dir) and len(os.listdir(output_dir)) >= 10000:
@@ -161,7 +170,24 @@ def calculate_cmmd(path_dataset: str, path_generated: str, device: str):
         print(f"\nAn error occurred during CMMD calculation: {e}")
         return None
 
+def calculate_generation_values(quant_dir: str, device: str):
+    pipe, inference_step = load_quantized_pipeline(quant_dir, device)
 
+    total_info = []
+    
+    for i in tqdm(range(100), desc="Generating image"):
+        seed = random.randint(0, 1000000)
+        generator = torch.Generator(device=device).manual_seed(seed)
+
+        with track_info() as info:
+            output = pipe(class_labels=[0], generator=generator, num_inference_steps=inference_step)
+
+        total_info += info
+
+    vram_max = max(x["vram"] for x in total_info)
+    time_mean = sum(x["time"] for x in total_info) / len(total_info)
+    return vram_max, time_mean
+    
 
 
 if __name__ == "__main__":
@@ -180,6 +206,8 @@ if __name__ == "__main__":
     download = args.download
     batch_size = args.batch_size
 
+    quant_dir = f"output/{model_id}"
+
     json_path = f"json/{model_id}.json"
     if not os.path.exists(json_path):
         json_path = "../" + json_path
@@ -194,7 +222,7 @@ if __name__ == "__main__":
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Carica subito il JSON per leggere le metriche già calcolate
+    
     with open(json_path, "r") as J:
         json_file = json.load(J)
         
@@ -209,36 +237,44 @@ if __name__ == "__main__":
 
     # 1. FID
     if "FID" not in metrics or metrics["FID"] is None:
-        print("\n--- Calcolo FID ---")
+        print("\n--- FID ---")
         metrics["FID"] = compute_fid(path_dataset, path_generated, batch_size, device)
         save_json()
     else:
-        print(f"\n--- Saltato: FID già calcolato ({metrics['FID']:.4f}) ---")
+        print(f"\n--- FID: skipped ({metrics['FID']:.4f}) ---")
 
     # 2. Inception Score
     if "IS (mean)" not in metrics or metrics["IS (mean)"] is None:
-        print("\n--- Calcolo Inception Score (IS) ---")
+        print("\n--- Inception Score (IS) ---")
         is_mean, is_std = calculate_inception_score(path_generated, batch_size, device)
         metrics["IS (mean)"] = is_mean
         metrics["IS (std)"] = is_std
         save_json()
     else:
-        print(f"\n--- Saltato: Inception Score già calcolato ({metrics['IS (mean)']:.4f}) ---")
+        print(f"\n--- Inception Score: skipped ({metrics['IS (mean)']:.4f} +- {metrics['IS (std)']:.4f}) ---")
 
     # 3. sFID
     if "sFID" not in metrics or metrics["sFID"] is None:
-        print("\n--- Calcolo sFID ---")
+        print("\n--- sFID ---")
         metrics["sFID"] = calculate_sfid(path_dataset, path_generated, device)
         save_json()
     else:
-        print(f"\n--- Saltato: sFID già calcolato ({metrics['sFID']:.4f}) ---")
+        print(f"\n--- sFID: skipped ({metrics['sFID']:.4f}) ---")
 
     # 4. CMMD
     if "CMMD" not in metrics or metrics["CMMD"] is None:
-        print("\n--- Calcolo CMMD ---")
+        print("\n--- CMMD ---")
         metrics["CMMD"] = calculate_cmmd(path_dataset, path_generated, device)
         save_json()
     else:
-        print(f"\n--- Saltato: CMMD già calcolato ({metrics['CMMD']:.4f}) ---")
-        
-    print("\n[OK] Tutte le metriche sono state calcolate e salvate con successo!")
+        print(f"\n--- CMMD: skipped ({metrics['CMMD']:.4f}) ---")
+
+    # 5. Generation values
+    if "vram_max" not in metrics or metrics["vram_max"] is None:
+        print("\n--- Generation values ---")
+        vram_max, time_mean = calculate_generation_values(quant_dir,device)
+        metrics["vram_max"] = vram_max
+        metrics["time_mean"] = time_mean
+        save_json()
+    else:
+        print(f"\n--- Generation values: skipped (VRAM: {metrics['vram_max']:.4f}, time: {metrics['time_mean']:.4f}) ---")
