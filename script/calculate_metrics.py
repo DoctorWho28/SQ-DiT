@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+load_dotenv(".env")
 import json
 import argparse
 import torch
@@ -16,6 +17,7 @@ from clip_mmd import logic
 from inference import load_quantized_pipeline
 import contextlib
 import time
+from diffusers import DiTPipeline
 
 @contextlib.contextmanager
 def track_info():
@@ -36,11 +38,17 @@ def track_info():
     else:
         info["vram"] = 0.0
 
+class PatchedImagePathDataset(pytorch_fid.fid_score.ImagePathDataset):
+    def __init__(self, files, transforms=None):
+        super().__init__(sorted(files), transforms)
+        self.transforms = TF.Compose([
+            TF.Resize(256),
+            TF.CenterCrop(256),
+            TF.ToTensor()
+        ])
 
-
-
-
-OriginalDataset = pytorch_fid.fid_score.ImagePathDataset
+pytorch_fid.fid_score.ImagePathDataset = PatchedImagePathDataset
+OriginalDataset = PatchedImagePathDataset
 
 
 class ImageFolderDataset(Dataset):
@@ -50,8 +58,8 @@ class ImageFolderDataset(Dataset):
         if not os.path.exists(folder_path):
             raise FileNotFoundError(f"Directory not found: {folder_path}")
             
-        self.files = [os.path.join(folder_path, f) for f in os.listdir(folder_path) 
-                      if f.lower().endswith(('png', 'jpg', 'jpeg'))]
+        self.files = sorted([os.path.join(folder_path, f) for f in os.listdir(folder_path) 
+                             if f.lower().endswith(('png', 'jpg', 'jpeg'))])
         self.transform = transform
 
     def __len__(self):
@@ -76,11 +84,9 @@ def download_imagenet_val(output_dir: str):
         
     os.makedirs(output_dir, exist_ok=True)
     
-    # Caricamento token dal file env.txt
-    load_dotenv("env.txt")
     hf_token = os.getenv("HF_TOKEN")
     if hf_token:
-        print("Token HuggingFace trovato nel file env.txt, autenticazione in corso...")
+        print("Token HuggingFace trovato, autenticazione in corso...")
     
     dataset = load_dataset("ILSVRC/imagenet-1k", split="validation", token=hf_token, streaming=True)
     
@@ -107,7 +113,7 @@ def compute_fid(path_dataset: str, path_generated: str, batch_size: int, device:
     paths = [path_dataset, path_generated]
     
     try:
-        num_workers = min(os.cpu_count() or 8, 8)
+        num_workers = 0 if os.name == 'nt' else min(os.cpu_count() or 8, 8)
         
         fid_value = pytorch_fid.fid_score.calculate_fid_given_paths(
             paths=paths,
@@ -134,7 +140,8 @@ def calculate_inception_score(path_generated: str, batch_size: int, device: str)
     ])
     
     dataset = ImageFolderDataset(path_generated, transform=transform)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=min(os.cpu_count() or 4, 4))
+    num_workers_is = 0 if os.name == 'nt' else min(os.cpu_count() or 4, 4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers_is)
     
     isc = InceptionScore().to(device)
     
@@ -170,8 +177,14 @@ def calculate_cmmd(path_dataset: str, path_generated: str, device: str):
         print(f"\nAn error occurred during CMMD calculation: {e}")
         return None
 
-def calculate_generation_values(quant_dir: str, device: str):
-    pipe, inference_step = load_quantized_pipeline(quant_dir, device)
+def calculate_generation_values(quant_dir: str, model_id: str, device: str):
+    config_path = os.path.join(quant_dir, "quantization_config.json")
+    if os.path.exists(config_path):
+        pipe, inference_step = load_quantized_pipeline(quant_dir, device)
+    else:
+        pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
+        pipe = pipe.to(device)
+        inference_step = 20
 
     total_info = []
     
@@ -182,7 +195,7 @@ def calculate_generation_values(quant_dir: str, device: str):
         with track_info() as info:
             output = pipe(class_labels=[0], generator=generator, num_inference_steps=inference_step)
 
-        total_info += info
+        total_info.append(info)
 
     vram_max = max(x["vram"] for x in total_info)
     time_mean = sum(x["time"] for x in total_info) / len(total_info)
@@ -221,6 +234,11 @@ if __name__ == "__main__":
     assert(os.path.exists(path_generated)),f"The path of generated images desn't exists"
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Rendi PyTorch deterministico
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     
     
     with open(json_path, "r") as J:
@@ -272,7 +290,7 @@ if __name__ == "__main__":
     # 5. Generation values
     if "vram_max" not in metrics or metrics["vram_max"] is None:
         print("\n--- Generation values ---")
-        vram_max, time_mean = calculate_generation_values(quant_dir,device)
+        vram_max, time_mean = calculate_generation_values(quant_dir, model_id, device)
         metrics["vram_max"] = vram_max
         metrics["time_mean"] = time_mean
         save_json()
