@@ -1,53 +1,48 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from diffusers import DiTPipeline
 import numpy as np
 from tqdm import tqdm
-import math
-import matplotlib.pyplot as plt
+import json
+from torchmetrics.functional import signal_noise_ratio
 
-from script.slider_quant import SliderQuantLinear
+from script.slider_quant import SliderQuantLinear, SKIP_NAMES, HIGH_NAMES
 
-def apply_fake_quantization_to_module(module, bits=4, group_size=128):
+def apply_fake_quantization_to_module(module: nn.Module, bits_low: int, bits_high: int, bits_act: int, group_size: int):
     """
     Dynamically replaces the Linear layers of a module with the SliderQuantLinear class.
     Returns a dictionary containing the original layers so they can be restored.
     """
     original_linears = {}
-    
-    def replace_linears(m, prefix=""):
+
+    def replace_linears(m: nn.Module, path: str=""):
         for name, child in m.named_children():
-            full_name = f"{prefix}.{name}" if prefix else name
-            
-            if any(skip in name for skip in ["norm1", "emb"]):
+            full_name = f"{path}.{name}" if path else name
+            if any(skip == name for skip in SKIP_NAMES):
                 continue
                 
             if isinstance(child, nn.Linear):
                 original_linears[full_name] = child
-                
-                sq_linear = SliderQuantLinear(
-                    original_linear=child, 
-                    weight_bits=bits, 
-                    act_bits=bits, 
-                    rank=0, 
-                    gamma=1.0, 
-                    group_size=group_size
-                )
-                setattr(m, name, sq_linear)
+                if child.in_features % group_size == 0:
+                    current_bits_weight = bits_low
+                    if any(high in full_name for high in HIGH_NAMES):
+                        current_bits_weight = bits_high
+                    sq_linear = SliderQuantLinear(child, bits_weight=current_bits_weight, bits_act=bits_act, rank=0, gamma=1.0, group_size=group_size)
+                    setattr(module, name, sq_linear)
             else:
                 replace_linears(child, full_name)
+    
                 
     replace_linears(module)
     return original_linears
 
-def restore_original_weights(module, original_linears):
+def restore_original_weights(module: nn.Module, original_linears: dict[str, nn.Module]):
     """
     Restores the original Linear layers that were previously replaced.
     """
-    def restore_linears(m, prefix=""):
+    def restore_linears(m: nn.Module, path=""):
         for name, child in m.named_children():
-            full_name = f"{prefix}.{name}" if prefix else name
+            full_name = f"{path}.{name}" if path else name
             if full_name in original_linears:
                 setattr(m, name, original_linears[full_name])
             else:
@@ -55,10 +50,6 @@ def restore_original_weights(module, original_linears):
                 
     restore_linears(module)
 
-try:
-    from torchmetrics.functional import signal_noise_ratio
-except ImportError:
-    raise ImportError("torchmetrics is required: pip install torchmetrics")
 
 def compute_snr_divergence(out_baseline, out_quantized):
     """
@@ -71,7 +62,7 @@ def compute_snr_divergence(out_baseline, out_quantized):
     return linear_nsr
 
 
-def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_param=0.1, num_samples=16):
+def compute_layer_sensitivity(model_id: str, bits_low: int, bits_high: int, bits_act: int, group_size: int, lambda_param: float, num_samples: int):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model {model_id}...")
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
@@ -101,7 +92,7 @@ def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_p
     
     current_activation_mag = 0.0
     def get_activation_hook():
-        def hook(module, input, output):
+        def hook(output):
             nonlocal current_activation_mag
             current_activation_mag = output[0].abs().mean().item()
         return hook
@@ -112,7 +103,7 @@ def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_p
     for i, block in enumerate(tqdm(blocks, desc="Analyzing Blocks")):
         
         handle = block.register_forward_hook(get_activation_hook())
-        orig_weights = apply_fake_quantization_to_module(block, bits=bits)
+        original_linears = apply_fake_quantization_to_module(block, bits_low, bits_high, bits_act, group_size)
         
         with torch.no_grad():
             out_quantized = transformer(
@@ -122,7 +113,7 @@ def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_p
             ).sample
             
         handle.remove()
-        restore_original_weights(block, orig_weights)
+        restore_original_weights(block, original_linears)
         
         divergence = compute_snr_divergence(out_baseline, out_quantized)
         
@@ -134,49 +125,42 @@ def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_p
     
     max_act_mag = np.max(activation_magnitudes)
     final_scores = divergence_scores * (1 + lambda_param * (activation_magnitudes / max_act_mag))
-    
-    print("\n=== LAYER-WISE SENSITIVITY RESULTS (Higher Score = More Sensitive) ===")
-    for i, score in enumerate(final_scores):
-        print(f"Layer {i:02d}: Score={score:.6f} | Divergence={divergence_scores[i]:.6f} | Act Mag={activation_magnitudes[i]:.4f}")
 
     mu_score = np.mean(final_scores)
     sigma_score = np.std(final_scores)
+
+    json_file = {
+        "max_act_mag": max_act_mag,
+        "mean": mu_score,
+        "std": sigma_score,
+        "layers": []
+        }
+
     
-    print("\n--- Adaptive Thresholds for Mixed-Precision ---")
-    threshold_high = mu_score + 0.5 * sigma_score
-    threshold_mid = mu_score
-    print(f"FP32/BF16 Threshold (Highly Sensitive): > {threshold_high:.6f}")
-    print(f"INT8 Threshold (Medium Sensitivity):    > {threshold_mid:.6f}")
-    print(f"INT4 Threshold (Low Sensitivity):       <= {threshold_mid:.6f}")
-    
-    print("\nGenerating plot...")
-    plt.figure(figsize=(12, 6))
-    layers = np.arange(len(final_scores))
-    
-    plt.plot(layers, final_scores, marker='o', linestyle='-', color='b', linewidth=2, label='Sensitivity Score')
-    
-    plt.axhline(y=threshold_high, color='r', linestyle='--', linewidth=1.5, label='High Threshold (FP32/BF16)')
-    plt.axhline(y=threshold_mid, color='orange', linestyle='--', linewidth=1.5, label='Medium Threshold (INT8)')
-    
-    ymin, ymax = plt.ylim()
-    plt.axhspan(threshold_high, ymax, facecolor='red', alpha=0.1)
-    plt.axhspan(threshold_mid, threshold_high, facecolor='orange', alpha=0.1)
-    plt.axhspan(ymin, threshold_mid, facecolor='green', alpha=0.1)
-    
-    plt.title('Layer-Wise Sensitivity Curve (U-Shape)', fontsize=14, fontweight='bold')
-    plt.xlabel('Transformer Block Index', fontsize=12)
-    plt.ylabel('Sensitivity Score (Higher = More Sensitive)', fontsize=12)
-    
-    plt.xticks(layers)
-    plt.grid(True, alpha=0.3, linestyle=':')
-    plt.legend()
-    plt.tight_layout()
-    
-    plt.savefig('sensitivity_curve.png', dpi=300)
-    print("Plot saved successfully as 'sensitivity_curve.png'!")
-    plt.show()
-    
-    return final_scores
+    print("\n=== LAYER-WISE SENSITIVITY RESULTS (Higher Score = More Sensitive) ===")
+    for i, score in enumerate(final_scores):
+        layer_values = {
+            "score": score[i],
+            "divergence": divergence[i],
+            "act_mag": activation_magnitudes[i]
+        }
+        json_file["layers"].append(layer_values)
+        print(f"Layer {i:02d}: Score={score:.6f} | Divergence={divergence_scores[i]:.6f} | Act Mag={activation_magnitudes[i]:.4f}")
+
+    model_id_safe = model_id.replace("/","_")
+    json_path = f"sensitivity_{model_id_safe}_W{bits_low}A{bits_act}"
+
+    with open(json_path,"w") as J:
+        json.dump(json_file,J,indent=4)
+
 
 if __name__ == "__main__":
-    compute_layer_sensitivity()
+    compute_layer_sensitivity(
+        "facebook/DiT-XL-2-256",
+        4,
+        8,
+        8,
+        128,
+        0.1,
+        16
+    )

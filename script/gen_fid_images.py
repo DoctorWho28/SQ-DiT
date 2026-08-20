@@ -27,9 +27,9 @@ def save_json_info(model_id: str, batch_size: int, images_per_class: int, calc_f
 
     if "generation" not in json_file:
         json_file["generation"] = {
-            "vram_max_total": torch.cuda.max_memory_allocated() / (1024**3),
+            "vram_max_total (GB)": torch.cuda.max_memory_allocated() / (1024**3),
             "batch_size": batch_size,
-            "image_num_per_class": images_per_class}
+            "images_per_class": images_per_class}
 
 
     with open(json_path, "w") as J:

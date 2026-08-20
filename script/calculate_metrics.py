@@ -1,6 +1,5 @@
 import os
 from dotenv import load_dotenv
-load_dotenv(".env")
 import json
 import argparse
 import torch
@@ -18,6 +17,8 @@ from inference import load_quantized_pipeline
 import contextlib
 import time
 from diffusers import DiTPipeline
+
+load_dotenv(".env")
 
 @contextlib.contextmanager
 def track_info():
@@ -73,12 +74,14 @@ class ImageFolderDataset(Dataset):
 
 
 
-def download_imagenet_val(output_dir: str):
-    if os.path.exists(output_dir) and len(os.listdir(output_dir)) >= 10000:
+def download_imagenet_val(output_dir: str, images_per_class: int):
+    total_images = images_per_class * 1000
+
+    if os.path.exists(output_dir) and len(os.listdir(output_dir)) >= total_images:
         print(f"Folder '{output_dir}' already exists and contains the images.")
-        return # Esce dalla funzione se abbiamo già scaricato le 10k immagini
+        return
         
-    print("Downloading ImageNet-1k dataset (Validation set, 10k images)...")
+    print(f"Downloading ImageNet-1k dataset (Validation set, {images_per_class}k images)...")
     print("WARNING: You might be required to login to HuggingFace.")
     print("If the download fails due to permissions, run 'huggingface-cli login' in the terminal.")
         
@@ -86,7 +89,7 @@ def download_imagenet_val(output_dir: str):
     
     hf_token = os.getenv("HF_TOKEN")
     if hf_token:
-        print("Token HuggingFace trovato, autenticazione in corso...")
+        print("Token HuggingFace found")
     
     dataset = load_dataset("ILSVRC/imagenet-1k", split="validation", token=hf_token, streaming=True)
     
@@ -95,9 +98,9 @@ def download_imagenet_val(output_dir: str):
     class_counts = {i: 0 for i in range(1000)}
     total_saved = 0
     
-    with tqdm(total=10000, desc="Saving Images") as pbar:
+    with tqdm(total=total_images, desc="Saving Images") as pbar:
         for item in dataset:
-            if total_saved >= 10000:
+            if total_saved >= total_images:
                 break
                 
             label = item["label"]
@@ -166,7 +169,6 @@ def calculate_sfid(path_dataset: str, path_generated: str, device: str):
 def calculate_cmmd(path_dataset: str, path_generated: str, device: str):
     
     try:
-        # Passiamo semplicemente "cuda" o "cpu" alla libreria CMMD
         prep = logic.CMMD(device=device) 
         
         cmmd_score = prep.execute(path_dataset, path_generated)
@@ -177,14 +179,16 @@ def calculate_cmmd(path_dataset: str, path_generated: str, device: str):
         print(f"\nAn error occurred during CMMD calculation: {e}")
         return None
 
-def calculate_generation_values(quant_dir: str, model_id: str, device: str):
+def calculate_generation_values(quant_dir: str, device: str, model_id: str = "", inference_step: int = 0):
     config_path = os.path.join(quant_dir, "quantization_config.json")
     if os.path.exists(config_path):
         pipe, inference_step = load_quantized_pipeline(quant_dir, device)
     else:
+        assert(inference_step > 0),"The inference steps for a non quantized model must be specified"
+        assert(len(model_id) > 0),"The model id must be the name of the non quantized model"
         pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16)
         pipe = pipe.to(device)
-        inference_step = 20
+        
 
     total_info = []
     
@@ -193,7 +197,7 @@ def calculate_generation_values(quant_dir: str, model_id: str, device: str):
         generator = torch.Generator(device=device).manual_seed(seed)
 
         with track_info() as info:
-            output = pipe(class_labels=[0], generator=generator, num_inference_steps=inference_step)
+            pipe(class_labels=[0], generator=generator, num_inference_steps=inference_step)
 
         total_info.append(info)
 
@@ -210,7 +214,8 @@ if __name__ == "__main__":
     parser.add_argument("-pg", "--path_generated", type=str, required=True, help="Path to generated imaged")
     parser.add_argument("-d", "--download", action="store_true", help="Download the images if activated")
     parser.add_argument("-bs", "--batch_size", type=int, required=False, default=1, help="Batch size")
-
+    parser.add_argument("-n", "--images_per_class", type=int ,required=False, default=50, help="Number of images per class")
+    parser.add_argument("-i", "--inference_step", type=int ,required=False, default=20, help="Inference step for non quantized models")
 
     args = parser.parse_args()
     model_id = args.model_id
@@ -218,6 +223,8 @@ if __name__ == "__main__":
     path_generated = args.path_generated
     download = args.download
     batch_size = args.batch_size
+    images_per_class = args.images_per_class
+    inference_step = args.inference_step
 
     quant_dir = f"output/{model_id}"
 
@@ -228,14 +235,14 @@ if __name__ == "__main__":
     assert(os.path.exists(json_path)),f"The model doesn't have a json to save the scores at {json_path}"
 
     if download:
-        download_imagenet_val(path_dataset)
+        download_imagenet_val(path_dataset, images_per_class)
 
     assert(os.path.exists(path_dataset)),f"The path of dataset doesn't exists"
     assert(os.path.exists(path_generated)),f"The path of generated images desn't exists"
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # Rendi PyTorch deterministico
+    
     if torch.cuda.is_available():
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -290,8 +297,8 @@ if __name__ == "__main__":
     # 5. Generation values
     if "vram_max" not in metrics or metrics["vram_max"] is None:
         print("\n--- Generation values ---")
-        vram_max, time_mean = calculate_generation_values(quant_dir, model_id, device)
-        metrics["vram_max"] = vram_max
+        vram_max, time_mean = calculate_generation_values(quant_dir, device, model_id, inference_step)
+        metrics["vram_max (GB)"] = vram_max
         metrics["time_mean"] = time_mean
         save_json()
     else:

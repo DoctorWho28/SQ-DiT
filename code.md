@@ -65,7 +65,7 @@ Nelle versioni iniziali (es. V3), la Loss esplodeva a valori anomali (es. 500.00
 
 -TODO:
     - Iniziare report
-    - Ricalcolare pesi dei modelli (escludendo vae e scheduler), per l'originare considerare il modello a 16 bit
+    - Scrivere README.md
 
 
 Ordine delle cose da runnare:
@@ -75,4 +75,3 @@ Ordine delle cose da runnare:
 
 Per creare solo un'immagine:
     - inference
-

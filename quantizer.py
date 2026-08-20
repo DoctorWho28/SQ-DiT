@@ -36,7 +36,7 @@ def calculate_window_index(layer_shallow: int, layer_int: int, layer_deep: int, 
     return window_list
 
 @contextlib.contextmanager
-def track_info(operation_name):
+def track_info():
     info = {}
     use_cuda = torch.cuda.is_available()
     
@@ -50,10 +50,8 @@ def track_info(operation_name):
     info["time"] = time.time() - start_time
     
     if use_cuda:
-        info["vram_end"] = torch.cuda.memory_allocated() / (1024**3)
         info["vram_peak"] = torch.cuda.max_memory_allocated() / (1024**3)
     else:
-        info["vram_end"] = 0.0
         info["vram_peak"] = 0.0
 
 
@@ -156,7 +154,7 @@ if __name__== "__main__":
 
     window_list = calculate_window_index(layer_shallow, layer_int, layer_deep, window_size, window_step)
     
-    with track_info("Quantization") as info:
+    with track_info() as info:
         pipe = apply_sliderquant(pipe, device, timesteps, window_list, layer_shallow, layer_int, gamma, epoch_num, class_num, bits_low, bits_high, bits_act, rank, group_size, batch_size, use_batch_stacking)
 
     # Save the quantized model
@@ -199,8 +197,7 @@ if __name__== "__main__":
 
     json_file["quantization"] = {
         "time": info["time"],
-        "vram_quant_model": info["vram_end"],
-        "vram_max_quant": info["vram_peak"],
+        "vram_max_quant (GB)": info["vram_peak"],
         "model_size (MB)": model_size
     }
 
