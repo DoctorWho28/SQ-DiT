@@ -1,0 +1,141 @@
+\documentclass{article}
+
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{overpic}
+\usepackage{amssymb}
+
+\usepackage[accepted]{dlaiml2026}
+
+%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
+\dlaititlerunning{SQ-DiT: SliderQuant for Diffusion Models}
+
+\begin{document}
+
+\twocolumn[
+%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
+\dlaititle{SQ-DiT: SliderQuant for Diffusion Models}
+
+\begin{center}\today\end{center}
+
+\begin{dlaiauthorlist}
+%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
+\dlaiauthor{Simone Lidonnici - 2061343}{}
+\dlaiauthor{Pietro Adamo Morelli - 2087359}{}
+\end{dlaiauthorlist}
+
+%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
+\dlaicorrespondingauthor{\newline Simone Lidonnici}{lidonnici.2061343@studenti.uniroma1.it}
+\dlaicorrespondingauthor{\newline Pietro Adamo Morelli}{morelli.2087359@studenti.uniroma1.it}
+
+\vskip 0.3in
+]
+
+\printAffiliationsAndNotice{}
+
+\begin{abstract}
+%
+This is a \LaTeX template for writing your project report, to be submitted as part of the final exam. The template can not be modified (you can not change margins, spaces, etc.), and using this template is mandatory. Please read the main text for further details.
+%
+\end{abstract}
+
+% ------------------------------------------------------------------------------
+\section{Introduction}\label{sec:intro}
+
+Once you have finished your project, you are required to submit a report using this template. In principle, the only files you need to modify are ``main.tex'' and ``bibliography.tex'' (see Section~\ref{sec:latex} for more details). Hence, you can simply take this document and modify it directly with your own content.
+
+\paragraph*{Limits.}
+The report must have at most 2 pages, without counting the bibliography, which can go to page 3. For team projects, you get +1 page per additional student. 
+
+\emph{Before} the references, you are required to include a written statement on whether and how AI-based tooling was used as an aid for the project. See Sec. \ref{sec:ai} for more details.
+
+\emph{After} the references, you \emph{can} (but you are not required to) add an Appendix with supplementary material, like additional experiments, plots, or theorem proofs.
+
+\paragraph*{Code.} 
+Submitting your code is part of the exam. It need not be public (although we encourage it), but at least we must be able to access it for proper evaluation. One possibility is to put your code on a github repository. Please link the code directly from the report, example link: \url{https://github.com/erodola/DLAI-s2-2026}.
+
+% ------------------------------------------------------------------------------
+\section{Related works}\label{sec:related}
+
+There is no mandatory structure to adopt, but a typical report should look as follows. 1) An \textbf{introduction} section where the problem is presented, and the overall proposed approach is briefly described; 2) a \textbf{related work} section; 3) a \textbf{method} section, where the main methodology used for the project is described; 4) experimental \textbf{results} (qualitative, quantitative, or both); 5) \textbf{discussion and conclusions}.
+
+% ------------------------------------------------------------------------------
+\section{Quantization implementation}\label{sec:quant}
+
+If this is your first time using \LaTeX, here are a few common instructions that you may find useful. Please read this while looking at the source code.
+
+\paragraph*{Formulas.}
+You can write formulas inline, such as $x^2$, or you can put them in their own environment, for example:
+%
+\begin{equation}\label{eq:dirichlet}
+\lambda_i = \int_\mathcal{X} \langle \nabla \phi_i(x), \nabla \phi_i(x) \rangle dx \,.
+\end{equation}
+
+You can also refer to formulas without having to write their equation number by hand, such as Equation~\eqref{eq:dirichlet}.
+
+\paragraph*{Figures.}
+You can and are encouraged to include figures. See an example with Figure~\ref{fig:torus}.
+
+%\begin{figure}[t]
+%    \centering
+%    \includegraphics[width=\linewidth]{images/sensitivity_plot.png}
+%    \caption{In the figure caption, you can write what you want including formulas, e.g. $\mathcal{X} \subset \mathbb{R}^3$. Notice that in this figure, we added mathematical symbols on top of the image by using the overpic command.}
+%    \label{fig:torus}
+%\end{figure}
+
+
+\paragraph*{Table.}
+Tables can be used to report quantitative results. See Table \ref{tab:results} for an example.
+
+\begin{table}[h!]
+\caption{Performance comparison.}
+\label{tab:results}
+\begin{center}
+\begin{small}
+\begin{tabular}{p{0.16\linewidth} | ccccc}
+\toprule
+& \multirow{2}{0.1\linewidth}{$\beta$ VAE}& \multirow{2}{0.1\linewidth}{DCI Dis.}& \multirow{2}{0.1\linewidth}{MIG}& \multirow{2}{0.1\linewidth}{MIG-PCA}& \multirow{2}{0.1\linewidth}{MIG-KM}\\
+\#factors \\
+\midrule
+One      & 100\% & \textbf{99.0\%} &  63.7\% & 73.5\% &  69.2\%  \\
+Variable & 98.9\% & 94.9\% & 62.3\% &  70.5\%& \textbf{66.9\%} \\
+\bottomrule
+\end{tabular}
+\end{small}
+\end{center}
+\vspace{-0.5cm}
+\end{table}
+
+\paragraph*{Bibliography.}
+This is an example bibliographic reference \cite{wang2026sliderquant}. If you want to add more, you must edit the file ``references.bib''.
+
+
+\section{Evaluation}\label{sec:eval}
+
+
+\section{Conclusions}\label{sec:conc}
+
+\cleardoublepage
+\section*{Statement on the use of AI}\label{sec:ai}
+%
+Students must include a brief statement describing whether AI tools were used in the project and, if so, how they were used. This declaration is required for transparency, but it is not intended to penalize the use of AI in any way. A project may receive any grade in the full $0 - 31$ range regardless of whether AI tools were used extensively, minimally, or not at all.
+
+The statement should clearly indicate the role of AI in the project. Examples include, but are not limited to: rephrasing or editing parts of the report, assisting with code writing, implementing core algorithms, preparing experiment scripts, debugging, data processing, literature exploration, or generating plots and other supporting material. Students are expected to be honest and sufficiently specific.
+
+The responsibility for the submitted work always remains with the student(s). In particular, students must fully understand, verify, and be able to explain any material produced with the help of AI tools.
+
+\textbf{Misuse of AI will be penalized.} Examples include submitting AI-generated material that the student does not understand, cannot justify, or cannot explain if required to do so; presenting AI-produced text, code, experimental results, or claims as if they had been independently developed or verified when this is not the case; or providing inaccurate or misleading declarations about the actual use of AI in the project.
+
+There is no strict length limit for this section, but in most cases one column or less should be sufficient.
+
+\bibliography{references.bib}
+\bibliographystyle{dlaiml2026}
+
+\section*{Appendix}
+%
+In case you need an appendix, this is the right place to append it.
+
+\end{document}
+

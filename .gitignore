@@ -10,4 +10,7 @@ log*.txt
 *_checkpoints
 plot*
 .env
-
+*.sty
+*.bst
+*.bbl
+*.synctex.gz

@@ -1,4 +1,4 @@
-# SQ-DiT: Slider Quant for Diffusion Model
+# SQ-DiT: Slider Quant for Diffusion Models
 
 This repository applies the **SliderQuant** quantization methodology to **Diffusion Transformers (DiT)**, along with evaluation tools for the quantized models.
 
