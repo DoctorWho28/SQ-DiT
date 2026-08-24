@@ -1,20 +1,17 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from diffusers import DiTPipeline
 import numpy as np
 from tqdm import tqdm
-import math
-import matplotlib.pyplot as plt
-
 import sys
 import os
 import json
+from torchmetrics.functional import signal_noise_ratio
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from script.slider_quant import SliderQuantLinear
+from script.slider_quant import SliderQuantLinear, SKIP_NAMES
 
-def apply_fake_quantization_to_module(module, bits=4, group_size=128):
+def apply_fake_quantization_to_module(module: nn.Module, bits: int, group_size: int):
     """
     Dynamically replaces the Linear layers of a module with the SliderQuantLinear class.
     Returns a dictionary containing the original layers so they can be restored.
@@ -25,7 +22,7 @@ def apply_fake_quantization_to_module(module, bits=4, group_size=128):
         for name, child in m.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
             
-            if any(skip in name for skip in [ "emb"]):
+            if any(skip in name for skip in SKIP_NAMES):
                 continue
                 
             if isinstance(child, nn.Linear):
@@ -59,11 +56,7 @@ def restore_original_weights(module, original_linears):
                 restore_linears(child, full_name)
                 
     restore_linears(module)
-
-try:
-    from torchmetrics.functional import signal_noise_ratio
-except ImportError:
-    raise ImportError("torchmetrics is required: pip install torchmetrics")
+    
 
 def compute_snr_divergence(out_baseline, out_quantized):
     """
@@ -76,7 +69,7 @@ def compute_snr_divergence(out_baseline, out_quantized):
     return linear_nsr
 
 
-def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_param=0.1, num_samples=16):
+def compute_layer_sensitivity(model_id: str, bits: int, group_size: int, lambda_param: float, num_samples: int):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model {model_id}...")
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
@@ -117,7 +110,7 @@ def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_p
     for i, block in enumerate(tqdm(blocks, desc="Analyzing Blocks")):
         
         handle = block.register_forward_hook(get_activation_hook())
-        orig_weights = apply_fake_quantization_to_module(block, bits=bits)
+        orig_weights = apply_fake_quantization_to_module(block, bits, group_size)
         
         with torch.no_grad():
             out_quantized = transformer(
