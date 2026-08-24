@@ -1,42 +1,58 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers import DiTPipeline
 import numpy as np
 from tqdm import tqdm
-import json
-from torchmetrics.functional import signal_noise_ratio
+import math
+import matplotlib.pyplot as plt
 
+import sys
+import os
+import json
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from script.slider_quant import SliderQuantLinear
 
-def apply_fake_quantization_to_module(module: nn.Module, bits: int, group_size: int):
+def apply_fake_quantization_to_module(module, bits=4, group_size=128):
     """
     Dynamically replaces the Linear layers of a module with the SliderQuantLinear class.
     Returns a dictionary containing the original layers so they can be restored.
     """
     original_linears = {}
-
-    def replace_linears(m: nn.Module, path: str=""):
+    
+    def replace_linears(m, prefix=""):
         for name, child in m.named_children():
-            full_name = f"{path}.{name}" if path else name
+            full_name = f"{prefix}.{name}" if prefix else name
+            
+            if any(skip in name for skip in [ "emb"]):
+                continue
+                
             if isinstance(child, nn.Linear):
                 original_linears[full_name] = child
-                if child.in_features % group_size == 0:
-                    sq_linear = SliderQuantLinear(child, bits_weight=bits, bits_act=16, rank=0, gamma=1.0, group_size=group_size)
-                    setattr(m, name, sq_linear)
+                
+                sq_linear = SliderQuantLinear(
+                    original_linear=child, 
+                    bits_weight=bits, 
+                    bits_act=bits, 
+                    rank=0, 
+                    gamma=1.0, 
+                    group_size=group_size
+                )
+                setattr(m, name, sq_linear)
             else:
                 replace_linears(child, full_name)
-    
                 
     replace_linears(module)
     return original_linears
 
-def restore_original_weights(module: nn.Module, original_linears: dict[str, nn.Module]):
+def restore_original_weights(module, original_linears):
     """
     Restores the original Linear layers that were previously replaced.
     """
-    def restore_linears(m: nn.Module, path=""):
+    def restore_linears(m, prefix=""):
         for name, child in m.named_children():
-            full_name = f"{path}.{name}" if path else name
+            full_name = f"{prefix}.{name}" if prefix else name
             if full_name in original_linears:
                 setattr(m, name, original_linears[full_name])
             else:
@@ -44,6 +60,10 @@ def restore_original_weights(module: nn.Module, original_linears: dict[str, nn.M
                 
     restore_linears(module)
 
+try:
+    from torchmetrics.functional import signal_noise_ratio
+except ImportError:
+    raise ImportError("torchmetrics is required: pip install torchmetrics")
 
 def compute_snr_divergence(out_baseline, out_quantized):
     """
@@ -56,7 +76,7 @@ def compute_snr_divergence(out_baseline, out_quantized):
     return linear_nsr
 
 
-def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_param: float, num_samples: int):
+def compute_layer_sensitivity(model_id="facebook/DiT-XL-2-256", bits=4, lambda_param=0.1, num_samples=16):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model {model_id}...")
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
@@ -86,7 +106,7 @@ def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_p
     
     current_activation_mag = 0.0
     def get_activation_hook():
-        def hook(output):
+        def hook(module, input, output):
             nonlocal current_activation_mag
             current_activation_mag = output[0].abs().mean().item()
         return hook
@@ -97,7 +117,7 @@ def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_p
     for i, block in enumerate(tqdm(blocks, desc="Analyzing Blocks")):
         
         handle = block.register_forward_hook(get_activation_hook())
-        original_linears = apply_fake_quantization_to_module(block, bits, group_size)
+        orig_weights = apply_fake_quantization_to_module(block, bits=bits)
         
         with torch.no_grad():
             out_quantized = transformer(
@@ -107,7 +127,7 @@ def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_p
             ).sample
             
         handle.remove()
-        restore_original_weights(block, original_linears)
+        restore_original_weights(block, orig_weights)
         
         divergence = compute_snr_divergence(out_baseline, out_quantized)
         
@@ -119,34 +139,31 @@ def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_p
     
     max_act_mag = np.max(activation_magnitudes)
     final_scores = divergence_scores * (1 + lambda_param * (activation_magnitudes / max_act_mag))
-
+    
     mu_score = np.mean(final_scores)
     sigma_score = np.std(final_scores)
 
     json_file = {
-        "max_act_mag": max_act_mag,
-        "mean": mu_score,
-        "std": sigma_score,
+        "max_act_mag": float(max_act_mag),
+        "mean": float(mu_score),
+        "std": float(sigma_score),
         "layers": []
-        }
+    }
 
-    
     print("\n=== LAYER-WISE SENSITIVITY RESULTS (Higher Score = More Sensitive) ===")
     for i, score in enumerate(final_scores):
+        print(f"Layer {i:02d}: Score={score:.6f} | Divergence={divergence_scores[i]:.6f} | Act Mag={activation_magnitudes[i]:.4f}")
         layer_values = {
-            "score": score[i],
-            "divergence": divergence[i],
-            "act_mag": activation_magnitudes[i]
+            "score": float(score),
+            "divergence": float(divergence_scores[i]),
+            "act_mag": float(activation_magnitudes[i])
         }
         json_file["layers"].append(layer_values)
-        print(f"Layer {i:02d}: Score={score:.6f} | Divergence={divergence_scores[i]:.6f} | Act Mag={activation_magnitudes[i]:.4f}")
 
-    model_id_safe = model_id.replace("/","_")
-    json_path = f"sensitivity_{model_id_safe}_W{bits}"
-
-    with open(json_path,"w") as J:
-        json.dump(json_file,J,indent=4)
-
+    with open("sensitivity_results.json", "w") as f:
+        json.dump(json_file, f, indent=4)
+    
+    return final_scores
 
 if __name__ == "__main__":
     compute_layer_sensitivity(
