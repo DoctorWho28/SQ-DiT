@@ -68,11 +68,11 @@ class BufferedFileLogger:
 
 if __name__== "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-m", "--model", type=str ,required=True, help="Model name")
+    parser.add_argument("-m", "--model_id", type=str ,required=True, help="Model name")
     parser.add_argument("-c", "--config", type=str, default="yaml/default.yaml", help="Path to config yaml")
 
     args = parser.parse_args()
-    model_id = args.model
+    model_id = args.model_id
     config_path = args.config
 
     print(f"Model: {model_id}")

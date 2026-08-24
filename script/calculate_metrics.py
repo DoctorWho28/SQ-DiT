@@ -214,7 +214,7 @@ if __name__ == "__main__":
     parser.add_argument("-pg", "--path_generated", type=str, required=True, help="Path to generated imaged")
     parser.add_argument("-d", "--download", action="store_true", help="Download the images if activated")
     parser.add_argument("-bs", "--batch_size", type=int, required=False, default=1, help="Batch size")
-    parser.add_argument("-n", "--images_per_class", type=int ,required=False, default=50, help="Number of images per class")
+    parser.add_argument("-n", "--images_per_class", type=int ,required=False, default=10, help="Number of images per class")
     parser.add_argument("-i", "--inference_step", type=int ,required=False, default=20, help="Inference step for non quantized models")
 
     args = parser.parse_args()

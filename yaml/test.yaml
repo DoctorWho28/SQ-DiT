@@ -1,7 +1,7 @@
 epoch: 1
 class_n: 1
-bits_int: 4
-bits_ext: 8
+bits_low: 4
+bits_high: 8
 bits_act: 8
 batch_size: 1
 window_size: 2

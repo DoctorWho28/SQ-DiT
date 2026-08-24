@@ -89,7 +89,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--model_id", type=str ,required=True, help="Model id (required)")
     parser.add_argument("-i", "--inference_step", type=int ,required=False, default=20, help="Inference step for non quantized models")
-    parser.add_argument("-n", "--images_per_class", type=int ,required=False, default=50, help="Number of images per class")
+    parser.add_argument("-n", "--images_per_class", type=int ,required=False, default=10, help="Number of images per class")
     parser.add_argument("-bs", "--batch_size", type=int ,required=False, default=1, help="Batch size")
     parser.add_argument("-s", "--seed", type=int ,required=False, default=42, help="Seed for image generation")
 

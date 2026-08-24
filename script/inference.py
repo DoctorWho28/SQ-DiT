@@ -111,7 +111,7 @@ def gen_orig_image(model_id: str, inference_step: int, class_label: list[int], d
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate an image from a quantized or original DiT model.")
     parser.add_argument("-d", "--quant_dir", type=str, default=None, help="Path to the quantized model directory")
-    parser.add_argument("-m", "--model", type=str, default=None, help="HuggingFace model ID for original model (e.g. facebook/DiT-XL-2-256)")
+    parser.add_argument("-m", "--model_id", type=str, default=None, help="HuggingFace model ID for original model (e.g. facebook/DiT-XL-2-256)")
     parser.add_argument("-i", "--inference_steps", type=int, default=20, help="Number of inference steps (required for original model)")
     parser.add_argument("-c", "--class_label", type=int, default=19, help="Class label to generate (default: 19)")
     parser.add_argument("-s", "--seed", type=int, default=None, help="Random seed (default: random)")
@@ -122,5 +122,5 @@ if __name__ == "__main__":
     
     if args.quant_dir:
         gen_quant_image(args.quant_dir, [args.class_label], device, seed=args.seed)
-    if args.model:
-        gen_orig_image(args.model, args.inference_steps, [args.class_label], device, seed=args.seed)
+    if args.model_id:
+        gen_orig_image(args.model_id, args.inference_steps, [args.class_label], device, seed=args.seed)

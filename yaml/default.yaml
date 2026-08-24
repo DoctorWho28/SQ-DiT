@@ -1,15 +1,15 @@
-epoch: 30
-class_n: 20
-bits_int: 4
-bits_ext: 8
-bits_act: 8
+epoch: 30                 # Number of training epoch
+class_n: 20               # Number of image class used in training
+bits_low: 4               # Bits used for low important layers
+bits_high: 8              # Bits used for high important layers
+bits_act: 8               # Activation bits
 batch_size: 4
 window_size: 2
 window_step: 1
-gamma: 0.5
-rank: 16
-group_size: 128
+gamma: 0.5                # Percentage of matrix quantized on first step
+rank: 16                  # Rank of Lora matrix
+group_size: 128           # Group size for weights quantization
 layer_shallow: 3
 layer_deep: 2
-use_batch_stacking: false
-inference_step: 20
+use_batch_stacking: false # Concatenates timesteps to parallelize the distillation process (much faster, but requires more VRAM)
+inference_step: 20        # Number of timesteps used when generating an image

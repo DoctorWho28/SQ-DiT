@@ -6,9 +6,9 @@ from tqdm import tqdm
 import json
 from torchmetrics.functional import signal_noise_ratio
 
-from script.slider_quant import SliderQuantLinear, SKIP_NAMES, HIGH_NAMES
+from script.slider_quant import SliderQuantLinear
 
-def apply_fake_quantization_to_module(module: nn.Module, bits_low: int, bits_high: int, bits_act: int, group_size: int):
+def apply_fake_quantization_to_module(module: nn.Module, bits: int, group_size: int):
     """
     Dynamically replaces the Linear layers of a module with the SliderQuantLinear class.
     Returns a dictionary containing the original layers so they can be restored.
@@ -18,17 +18,11 @@ def apply_fake_quantization_to_module(module: nn.Module, bits_low: int, bits_hig
     def replace_linears(m: nn.Module, path: str=""):
         for name, child in m.named_children():
             full_name = f"{path}.{name}" if path else name
-            if any(skip == name for skip in SKIP_NAMES):
-                continue
-                
             if isinstance(child, nn.Linear):
                 original_linears[full_name] = child
                 if child.in_features % group_size == 0:
-                    current_bits_weight = bits_low
-                    if any(high in full_name for high in HIGH_NAMES):
-                        current_bits_weight = bits_high
-                    sq_linear = SliderQuantLinear(child, bits_weight=current_bits_weight, bits_act=bits_act, rank=0, gamma=1.0, group_size=group_size)
-                    setattr(module, name, sq_linear)
+                    sq_linear = SliderQuantLinear(child, bits_weight=bits, bits_act=16, rank=0, gamma=1.0, group_size=group_size)
+                    setattr(m, name, sq_linear)
             else:
                 replace_linears(child, full_name)
     
@@ -62,7 +56,7 @@ def compute_snr_divergence(out_baseline, out_quantized):
     return linear_nsr
 
 
-def compute_layer_sensitivity(model_id: str, bits_low: int, bits_high: int, bits_act: int, group_size: int, lambda_param: float, num_samples: int):
+def compute_layer_sensitivity(model_id: str, bits:int, group_size: int, lambda_param: float, num_samples: int):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Loading model {model_id}...")
     pipe = DiTPipeline.from_pretrained(model_id, torch_dtype=torch.float16).to(device)
@@ -103,7 +97,7 @@ def compute_layer_sensitivity(model_id: str, bits_low: int, bits_high: int, bits
     for i, block in enumerate(tqdm(blocks, desc="Analyzing Blocks")):
         
         handle = block.register_forward_hook(get_activation_hook())
-        original_linears = apply_fake_quantization_to_module(block, bits_low, bits_high, bits_act, group_size)
+        original_linears = apply_fake_quantization_to_module(block, bits, group_size)
         
         with torch.no_grad():
             out_quantized = transformer(
@@ -148,7 +142,7 @@ def compute_layer_sensitivity(model_id: str, bits_low: int, bits_high: int, bits
         print(f"Layer {i:02d}: Score={score:.6f} | Divergence={divergence_scores[i]:.6f} | Act Mag={activation_magnitudes[i]:.4f}")
 
     model_id_safe = model_id.replace("/","_")
-    json_path = f"sensitivity_{model_id_safe}_W{bits_low}A{bits_act}"
+    json_path = f"sensitivity_{model_id_safe}_W{bits}"
 
     with open(json_path,"w") as J:
         json.dump(json_file,J,indent=4)
@@ -158,8 +152,6 @@ if __name__ == "__main__":
     compute_layer_sensitivity(
         "facebook/DiT-XL-2-256",
         4,
-        8,
-        8,
         128,
         0.1,
         16
