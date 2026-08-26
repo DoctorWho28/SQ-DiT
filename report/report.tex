@@ -9,24 +9,23 @@
 
 \usepackage[accepted]{dlaiml2026}
 
-%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
+\usepackage{todonotes}[inline]
+
+
 \dlaititlerunning{SQ-DiT: SliderQuant for Diffusion Models}
 
 \begin{document}
 
 \twocolumn[
-%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
 \dlaititle{SQ-DiT: SliderQuant for Diffusion Models}
 
 \begin{center}\today\end{center}
 
 \begin{dlaiauthorlist}
-%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
 \dlaiauthor{Simone Lidonnici - 2061343}{}
 \dlaiauthor{Pietro Adamo Morelli - 2087359}{}
 \end{dlaiauthorlist}
 
-%%% STUDENTS: FILL IN WITH YOUR OWN INFORMATION
 \dlaicorrespondingauthor{\newline Simone Lidonnici}{lidonnici.2061343@studenti.uniroma1.it}
 \dlaicorrespondingauthor{\newline Pietro Adamo Morelli}{morelli.2087359@studenti.uniroma1.it}
 
@@ -36,84 +35,85 @@
 \printAffiliationsAndNotice{}
 
 \begin{abstract}
-%
-This is a \LaTeX template for writing your project report, to be submitted as part of the final exam. The template can not be modified (you can not change margins, spaces, etc.), and using this template is mandatory. Please read the main text for further details.
-%
+Diffusion Transformers (DiTs) have recently established a new baseline for image generation models, but their major limitations are the heavy computational and memory requirements.
+To mitigate these bottlenecks, Post-Training Quantization (PTQ) offers a practical approach to compress these models without retraining.
+In this project, we adapt SliderQuant, a PTQ algorithm originally designed for Large Language Models (LLMs), to the visual generation domain.
+Code is available at: \url{https://github.com/DoctorWho28/deepLearning}.
 \end{abstract}
 
-% ------------------------------------------------------------------------------
+
 \section{Introduction}\label{sec:intro}
 
-Once you have finished your project, you are required to submit a report using this template. In principle, the only files you need to modify are ``main.tex'' and ``bibliography.tex'' (see Section~\ref{sec:latex} for more details). Hence, you can simply take this document and modify it directly with your own content.
+Diffusion Transformers (DiT) created a new standard of generative AI, replacing the convolutional U-Net backbone of diffusion models with a Transformer architecture.
+DiTs rely on \textbf{Adaptive Layer Normalization (AdaLN)} to inject continuous timestep and discrete class conditionings into each block, dynamically adapting intermediate feature states at each denoising step.
+DiTs achieve remarkable results in high-fidelity image generation, but their large parameter count and iterative approach lead to prohibitive memory consumption (VRAM) and slow inference speeds.
+To mitigate these computational bottlenecks, Post-Training Quantization (PTQ) techniques compress the weights to lower-bit formats without requiring a full model retraining.
 
-\paragraph*{Limits.}
-The report must have at most 2 pages, without counting the bibliography, which can go to page 3. For team projects, you get +1 page per additional student. 
 
-\emph{Before} the references, you are required to include a written statement on whether and how AI-based tooling was used as an aid for the project. See Sec. \ref{sec:ai} for more details.
+Recently, a PTQ framework named \textbf{SliderQuant} was introduced for Large Language Models (LLMs).
+SliderQuant exploits the fact that different layers in deep networks have different sensitivities to quantization noise. It introduces a sliding-window distillation approach, optimizing quantization parameters over small groups of layers, and introduces learnable low-rank matrices (LoRA) to compensate for the quantization error.
+\todo{possibile spiegazione della propagazione dell'errore}
 
-\emph{After} the references, you \emph{can} (but you are not required to) add an Appendix with supplementary material, like additional experiments, plots, or theorem proofs.
+SQ-DiT aims to adapt the core concepts of SliderQuant to Diffusion Transformers.
+The main difference is that SliderQuant calibrates LLMs over sequential tokens, whereas DiTs require optimizing across the temporal diffusion process.
+During the optimization process, the weights are quantized using fake quantization and only upon completition the final weights are packed into INT8 using our custom packing implementation to effectively save VRAM space.
+\todo{Aggiungere la specificazione sui modelli ImageNet-1k class-to-image e scrivere del modello \href{https://huggingface.co/facebook/DiT-XL-2-256}{facebook/DiT-XL-2-256}}
 
-\paragraph*{Code.} 
-Submitting your code is part of the exam. It need not be public (although we encourage it), but at least we must be able to access it for proper evaluation. One possibility is to put your code on a github repository. Please link the code directly from the report, example link: \url{https://github.com/erodola/DLAI-s2-2026}.
 
-% ------------------------------------------------------------------------------
 \section{Related works}\label{sec:related}
 
-There is no mandatory structure to adopt, but a typical report should look as follows. 1) An \textbf{introduction} section where the problem is presented, and the overall proposed approach is briefly described; 2) a \textbf{related work} section; 3) a \textbf{method} section, where the main methodology used for the project is described; 4) experimental \textbf{results} (qualitative, quantitative, or both); 5) \textbf{discussion and conclusions}.
+SQ-DiT derives from SliderQuant \cite{wang2026sliderquantaccurateposttrainingquantization} adapting the quantization and distillation concepts to the DiT architecture.
 
-% ------------------------------------------------------------------------------
+PTQ4DiT \cite{wu2024ptq4ditposttrainingquantizationdiffusion} and Q-DiT \cite{chen2024qditaccurateposttrainingquantization} serve as our primary foundational references for the state of the art in PTQ for DiTs.
+
+\todo{Possibile escursus sui paper usati per confrontare i risultati}
+
 \section{Quantization implementation}\label{sec:quant}
 
-If this is your first time using \LaTeX, here are a few common instructions that you may find useful. Please read this while looking at the source code.
+Because the original SliderQuant framework cannot be easily transposed, we developed the entire quantization framework from scratch.
 
-\paragraph*{Formulas.}
-You can write formulas inline, such as $x^2$, or you can put them in their own environment, for example:
-%
-\begin{equation}\label{eq:dirichlet}
-\lambda_i = \int_\mathcal{X} \langle \nabla \phi_i(x), \nabla \phi_i(x) \rangle dx \,.
-\end{equation}
+\paragraph{Timestep-Aware Window Distillation.}
+We group transformer blocks into sliding windows and optimize them sequentially.
+For each window, we optimize the quantization parameters by minimizing the Mean Squared Error (MSE) between the output features of the quantized blocks with their original unquantized counterparts. SliderQuant uses the $L^2$ norm intead of the MSE.
+\todo{Capire se scrivere meglio questa differenza}
 
-You can also refer to formulas without having to write their equation number by hand, such as Equation~\eqref{eq:dirichlet}.
+Unlike LLMs, where the input passes through each block only once, in DiT models the image is gradually denoised across multiple timesteps, passing through all the blocks at each step.
 
-\paragraph*{Figures.}
-You can and are encouraged to include figures. See an example with Figure~\ref{fig:torus}.
+Since data distributions change drastically throughout the denoising process, a quantization approach that propagates error across the timesteps would be unstable.
+For this reason, rather than allowing the error to propagate over time, each window jointly optimizes multiple timesteps.
+We provide the first block with the latents pre-calculated by the original FP16 model across all timesteps, while the subsequent blocks receive the output of the preceding quantized block.
 
-%\begin{figure}[t]
-%    \centering
-%    \includegraphics[width=\linewidth]{images/sensitivity_plot.png}
-%    \caption{In the figure caption, you can write what you want including formulas, e.g. $\mathcal{X} \subset \mathbb{R}^3$. Notice that in this figure, we added mathematical symbols on top of the image by using the overpic command.}
-%    \label{fig:torus}
-%\end{figure}
+By eliminating temporal propagation, we align the optimization with the SliderQuant paradigm used for LLMs, that don't have noise accumulation between timesteps.
+This allows the LoRA matrices within each window to focus exclusively on compensating for spatial errors propagated by preceding quantized layers.
+
+\todo{vedere se specificare che vengono fatte anche diverse classe congiuntamente}
+
+\paragraph{Mixed-Precision Architecture.}
+Following the original observation that network layers exhibit varying sensitivities to quantization, we apply a mixed-precision policy. Deep and shallow transformer blocks are highly sensitive and are therefore quantized to higher bit-widths (e.g., INT8) or kept in full precision. Intermediate layers, which are more robust to quantization noise, are aggressively quantized to 4-bit (INT4). Crucial layers responsible for condition injection, such as the Adaptive Layer Normalization (\texttt{norm1}) and time/class embeddings, are entirely excluded from quantization.
 
 
-\paragraph*{Table.}
-Tables can be used to report quantitative results. See Table \ref{tab:results} for an example.
-
-\begin{table}[h!]
-\caption{Performance comparison.}
-\label{tab:results}
-\begin{center}
-\begin{small}
-\begin{tabular}{p{0.16\linewidth} | ccccc}
-\toprule
-& \multirow{2}{0.1\linewidth}{$\beta$ VAE}& \multirow{2}{0.1\linewidth}{DCI Dis.}& \multirow{2}{0.1\linewidth}{MIG}& \multirow{2}{0.1\linewidth}{MIG-PCA}& \multirow{2}{0.1\linewidth}{MIG-KM}\\
-\#factors \\
-\midrule
-One      & 100\% & \textbf{99.0\%} &  63.7\% & 73.5\% &  69.2\%  \\
-Variable & 98.9\% & 94.9\% & 62.3\% &  70.5\%& \textbf{66.9\%} \\
-\bottomrule
-\end{tabular}
-\end{small}
-\end{center}
-\vspace{-0.5cm}
-\end{table}
-
-\paragraph*{Bibliography.}
-This is an example bibliographic reference \cite{wang2026sliderquant}. If you want to add more, you must edit the file ``references.bib''.
+\paragraph{Physical Packing.}
+A common pitfall in PTQ literature is simulating quantization without realizing actual memory savings. We implement a custom physical packing mechanism (\texttt{WXAXLinear}) to collapse the learned low-rank adapters back into the main weights post-distillation. The resulting parameters are physically packed into \texttt{uint8} tensors using bitwise shift and mask operations. This guarantees that our INT4 and INT8 configurations effectively reduce the VRAM footprint of the DiT model during inference.
 
 
 \section{Evaluation}\label{sec:eval}
 
+
+\begin{table}[h!]
+    \caption{Evaluation comparison}
+    \label{tab:evaluation}
+    \begin{small}
+        \begin{tabular}{c|ccccc}
+            \toprule
+            &Size&FIS $\downarrow$&IS $\uparrow$&sFID $\downarrow$&CMMD $\downarrow$\\
+            \midrule
+            FP16&1.58 GB&24.72&318 $\pm$ 7.9&59.3&0.236\\
+            W8A8&0.97 GB&24.48&322 $\pm$ 6.0&57.8&0.239\\
+            W4A8&0.78 GB&23.49&314 $\pm$ 6.7&55.7&0.236\\
+            \bottomrule
+        \end{tabular}
+    \end{small}
+\end{table}
 
 \section{Conclusions}\label{sec:conc}
 
@@ -134,8 +134,13 @@ There is no strict length limit for this section, but in most cases one column o
 \bibliographystyle{dlaiml2026}
 
 \section*{Appendix}
-%
-In case you need an appendix, this is the right place to append it.
+
+\paragraph{Adaptive Layer Normalization (AdaLN)}
+
+\paragraph{Sensitivity analysis}
+
+\paragraph{Simulation parameters}
+
 
 \end{document}
 
