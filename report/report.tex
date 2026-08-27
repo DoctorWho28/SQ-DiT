@@ -11,7 +11,6 @@
 
 \usepackage{todonotes}[inline]
 
-
 \dlaititlerunning{SQ-DiT: SliderQuant for Diffusion Models}
 
 \begin{document}
@@ -52,11 +51,10 @@ To mitigate these computational bottlenecks, Post-Training Quantization (PTQ) te
 
 Recently, a PTQ framework named \textbf{SliderQuant} was introduced for Large Language Models (LLMs).
 SliderQuant exploits the fact that different layers in deep networks have different sensitivities to quantization noise. It introduces a sliding-window distillation approach, optimizing quantization parameters over small groups of layers, and introduces learnable low-rank matrices (LoRA) to compensate for the quantization error.
-\todo{possibile spiegazione della propagazione dell'errore}
 
 SQ-DiT aims to adapt the core concepts of SliderQuant to Diffusion Transformers.
 The main difference is that SliderQuant calibrates LLMs over sequential tokens, whereas DiTs require optimizing across the temporal diffusion process.
-During the optimization process, the weights are quantized using fake quantization and only upon completition the final weights are packed into INT8 using our custom packing implementation to effectively save VRAM space.
+During the optimization process, the weights are quantized using fake quantization and only upon completion the final weights are packed into INT8 using our custom packing implementation to effectively save VRAM space.
 \todo{Aggiungere la specificazione sui modelli ImageNet-1k class-to-image e scrivere del modello \href{https://huggingface.co/facebook/DiT-XL-2-256}{facebook/DiT-XL-2-256}}
 
 
@@ -68,11 +66,28 @@ PTQ4DiT \cite{wu2024ptq4ditposttrainingquantizationdiffusion} and Q-DiT \cite{ch
 
 \todo{Possibile escursus sui paper usati per confrontare i risultati}
 
-\section{Quantization implementation}\label{sec:quant}
 
+\section{Method}\label{sec:quant}
+
+\subsection{SliderQuant}
+
+SliderQuant builds on the premise that initial (shallow) and terminal (deep) layers have higher quantization sensitivity than intermediate ones.
+These boundary layers are optimized using a progressively expanding window, while the intermediate layers are optimized using a fixed size sliding-window.
+In both cases, layers in the same window are quantized jointly.
+
+To minimize the weight quantization error, an optimizer is applied to a set of learnable parameter for each linear module, specifically a scaling factor ($\alpha$) and two low-rank LoRA matrices ($A$ and $B$).
+
+To soften the impact on the weights and avoid eccessive parameter perturbations, quantization is performed in two progressive stages: a partial quantization is applied according to a ratio $\gamma$, followed by the full quantization.
+To mitigate the impact of extreme weight values, we apply group-wise quantization, confining outliers to local groups and preserving the precision of the remaining parameters.
+
+
+\subsection{SQ-DiT implementation}
 Because the original SliderQuant framework cannot be easily transposed, we developed the entire quantization framework from scratch.
+\todo{Scrivere della creazione della classe SliderQuantLinear e della funzione \texttt{forward()}}
+
 
 \paragraph{Timestep-Aware Window Distillation.}
+
 We group transformer blocks into sliding windows and optimize them sequentially.
 For each window, we optimize the quantization parameters by minimizing the Mean Squared Error (MSE) between the output features of the quantized blocks with their original unquantized counterparts. SliderQuant uses the $L^2$ norm intead of the MSE.
 \todo{Capire se scrivere meglio questa differenza}
@@ -89,11 +104,26 @@ This allows the LoRA matrices within each window to focus exclusively on compens
 \todo{vedere se specificare che vengono fatte anche diverse classe congiuntamente}
 
 \paragraph{Mixed-Precision Architecture.}
-Following the original observation that network layers exhibit varying sensitivities to quantization, we apply a mixed-precision policy. Deep and shallow transformer blocks are highly sensitive and are therefore quantized to higher bit-widths (e.g., INT8) or kept in full precision. Intermediate layers, which are more robust to quantization noise, are aggressively quantized to 4-bit (INT4). Crucial layers responsible for condition injection, such as the Adaptive Layer Normalization (\texttt{norm1}) and time/class embeddings, are entirely excluded from quantization.
 
+Following the original observation that network layers exhibit varying sensitivities to quantization, we decided to augment the SliderQuant approch by applying a mixed-precision policy.
+Deep and shallow transformer blocks are highly sensitive and are therefore quantized to higher bit-widths (INT8 in our case) while intermediate layers, which are more robust to quantization noise, can be quantized to a lower bit-widths.
 
-\paragraph{Physical Packing.}
-A common pitfall in PTQ literature is simulating quantization without realizing actual memory savings. We implement a custom physical packing mechanism (\texttt{WXAXLinear}) to collapse the learned low-rank adapters back into the main weights post-distillation. The resulting parameters are physically packed into \texttt{uint8} tensors using bitwise shift and mask operations. This guarantees that our INT4 and INT8 configurations effectively reduce the VRAM footprint of the DiT model during inference.
+Other than that, crucial modules responsible for condition injection require special treatment. 
+The initial \texttt{emb} module, which maps discrete time and class conditions into a continuous embedding space, is kept in FP16.
+Since this conditioning guides the entire generative process, any error introduced here would cascade through all subsequent layers and degrade the feature representations.
+Similarly, the AdaLN (\texttt{norm1}) module, responsible for injecting temporal and class features to the network, is quantized to higher precision. Aggressively quantizing this layer would cause the network to lose temporal awareness and class concepts, leading to generation failures.
+
+Using this mixed-precision approach has a slight impact on VRAM utilization, but this is negligible compared to the benefits on generation stability.
+
+\paragraph{Weights Packing.}
+
+To effectively have an impact on the model size and VRAM utilization we implemented a custom \texttt{WXAXLinear} module as a replacement for standard linear layers.
+This module physically packs low-bit quantized weights into \texttt{INT8} using bitwise shift and masking operations.
+\todo{Spiegare come vengono fatti gli shift per INT4 e INT2}
+
+When loading the model to generate an image, we replace the original linear layers with their \texttt{WXAXLinear} counterparts and load the packed weights into memory.
+During inference, the layer performs on the fly unpacking, restoring the weights to FP16 dynamically to continue the image generation process.
+
 
 
 \section{Evaluation}\label{sec:eval}
@@ -102,10 +132,11 @@ A common pitfall in PTQ literature is simulating quantization without realizing 
 \begin{table}[h!]
     \caption{Evaluation comparison}
     \label{tab:evaluation}
+    \centering
     \begin{small}
         \begin{tabular}{c|ccccc}
             \toprule
-            &Size&FIS $\downarrow$&IS $\uparrow$&sFID $\downarrow$&CMMD $\downarrow$\\
+            &Size&FID $\downarrow$&IS $\uparrow$&sFID $\downarrow$&CMMD $\downarrow$\\
             \midrule
             FP16&1.58 GB&24.72&318 $\pm$ 7.9&59.3&0.236\\
             W8A8&0.97 GB&24.48&322 $\pm$ 6.0&57.8&0.239\\
@@ -114,8 +145,62 @@ A common pitfall in PTQ literature is simulating quantization without realizing 
         \end{tabular}
     \end{small}
 \end{table}
+\todo{Cambiare ordine in FID, sFID, IS, CMMD}
+
+\begin{table}[h!]
+    \caption{Delta comparison}
+    \label{tab:delta}
+    \centering
+    \begin{small}
+        \begin{tabular}{cc|ccccc}
+            \toprule
+            &Method&$\Delta$ size&$\Delta$FID&$\Delta$IS&$\Delta$sFID\\
+            \midrule
+            \multirow{3}{*}{W8A8}&PTQ4DiT&-1.9 GB&-0.5&4.44&-2.2\\
+            &ViDiT&-75 \%&-8 \%&+1.8 \%&-11\%\\
+            &Ours&12&56&78&45\\
+            \midrule
+            \multirow{3}{*}{W4A8}&PTQ4DiT&25&45&67&17\\
+            &ViDiT&89&56&13&34\\
+            &Ours&12&56&78&45\\
+            \bottomrule
+        \end{tabular}
+    \end{small}
+\end{table}
+
+
+Si può vedere un esempio delle differenze per un'immagine nella figura \ref{fig:image_comparison}.
+
+
+\begin{figure}[t]
+    \centering
+    \begin{minipage}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/fp16_image.png}
+        \centerline{\small (a) Original}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/w8a8_image.png}
+        \centerline{\small (b) W8A8}
+    \end{minipage}
+    \hfill
+    \begin{minipage}[b]{0.32\linewidth}
+        \centering
+        \includegraphics[width=\linewidth]{images/w4a8_image.png}
+        \centerline{\small (c) W4A8}
+    \end{minipage}
+    \caption{Visual comparison of generated samples}
+    \label{fig:image_comparison}
+\end{figure}
+
 
 \section{Conclusions}\label{sec:conc}
+
+
+
+
 
 \cleardoublepage
 \section*{Statement on the use of AI}\label{sec:ai}
@@ -141,6 +226,8 @@ There is no strict length limit for this section, but in most cases one column o
 
 \paragraph{Simulation parameters}
 
+\paragraph{Final weights formula}
+\[W = W \cdot \alpha + A \times B\]
 
 \end{document}
 
