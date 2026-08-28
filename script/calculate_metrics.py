@@ -104,7 +104,7 @@ def download_imagenet_val(output_dir: str, images_per_class: int):
                 break
                 
             label = item["label"]
-            if class_counts[label] < 10:
+            if class_counts[label] < images_per_class:
                 img = item["image"].convert("RGB")
                 img.save(os.path.join(output_dir, f"val_class_{label:03d}_{class_counts[label]:02d}.png"))
                 class_counts[label] += 1

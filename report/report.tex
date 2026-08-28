@@ -10,6 +10,7 @@
 \usepackage[accepted]{dlaiml2026}
 
 \usepackage{todonotes}[inline]
+\usepackage{xurl}
 
 \dlaititlerunning{SQ-DiT: SliderQuant for Diffusion Models}
 
@@ -77,7 +78,7 @@ In both cases, layers in the same window are quantized jointly.
 
 To minimize the weight quantization error, an optimizer is applied to a set of learnable parameter for each linear module, specifically a scaling factor ($\alpha$) and two low-rank LoRA matrices ($A$ and $B$).
 
-To soften the impact on the weights and avoid eccessive parameter perturbations, quantization is performed in two progressive stages: a partial quantization is applied according to a ratio $\gamma$, followed by the full quantization.
+To soften the impact on the weights and avoid excessive parameter perturbations, quantization is performed in two progressive stages: a partial quantization is applied according to a ratio $\gamma$, followed by the full quantization.
 To mitigate the impact of extreme weight values, we apply group-wise quantization, confining outliers to local groups and preserving the precision of the remaining parameters.
 
 
@@ -89,8 +90,9 @@ Because the original SliderQuant framework cannot be easily transposed, we devel
 \paragraph{Timestep-Aware Window Distillation.}
 
 We group transformer blocks into sliding windows and optimize them sequentially.
-For each window, we optimize the quantization parameters by minimizing the Mean Squared Error (MSE) between the output features of the quantized blocks with their original unquantized counterparts. SliderQuant uses the $L^2$ norm intead of the MSE.
-\todo{Capire se scrivere meglio questa differenza}
+For each window, we optimize the quantization parameters by minimizing the Mean Squared Error (MSE) between the output features of the quantized blocks with their original unquantized counterparts.
+SliderQuant uses the $L^2$ norm instead of the MSE.
+\todo{Capire se scrivere meglio questa differenza o scriverla sopra direttamente}
 
 Unlike LLMs, where the input passes through each block only once, in DiT models the image is gradually denoised across multiple timesteps, passing through all the blocks at each step.
 
@@ -105,7 +107,7 @@ This allows the LoRA matrices within each window to focus exclusively on compens
 
 \paragraph{Mixed-Precision Architecture.}
 
-Following the original observation that network layers exhibit varying sensitivities to quantization, we decided to augment the SliderQuant approch by applying a mixed-precision policy.
+Following the original observation that network layers exhibit varying sensitivities to quantization, we decided to augment the SliderQuant approach by applying a mixed-precision policy.
 Deep and shallow transformer blocks are highly sensitive and are therefore quantized to higher bit-widths (INT8 in our case) while intermediate layers, which are more robust to quantization noise, can be quantized to a lower bit-widths.
 
 Other than that, crucial modules responsible for condition injection require special treatment. 
@@ -128,6 +130,36 @@ During inference, the layer performs on the fly unpacking, restoring the weights
 
 \section{Evaluation}\label{sec:eval}
 
+\paragraph{Sensitivity Analysis}
+
+Following the principle introduced by SliderQuant, we conducted a sensitivity analysis to determine the optimal number of deep and shallow layers for DiTs.
+\todo{Da riscrivere meglio}
+Our sensitivity evaluation methodology is inspired by the Sensitivity-Aware Mixed Precision Quantization \cite{sensitivityanalysis} for LLMs, which estimates layer sensitivity by quantizing a single layer at a time, while keeping the rest of the network in FP16.
+In the original approach, divergence is measured using the Jensen-Shannon Divergence (JSD) between output probability distributions. However, since DiTs output continuous values rather than probabilities, JSD is inapplicable.
+We replaced it with the linear inverse of the Signal-to-Noise Ratio (SNR) \cite{roux2018sdrhalfbakeddone} to evaluate the continuous error.
+
+
+\paragraph{Optimization Parameters}
+
+The training was done using a \textit{GPU Nvidia RTX 4090} and based on its computational capabilities we selected the hyperparameters to balance the computational time required and the quantization quality.
+\todo{Scrivere che abbiamo modificato il codice per farlo runnare durante i test per la gpu molto potente}
+
+
+The optimization was conducted for \textbf{30 epochs} per quantization stage (60 in total), which proved sufficient for the learnable parameters to converge and effectively compensate for the quantization noise, avoiding overfitting.
+To ensure that the calibrated parameters generalize well across different image concepts, we uniformly sampled a subset of \textbf{20 classes}, taking one every 50 classes, for our calibration.
+Furthermore, we optimized the model over \textbf{20 inference steps}, which we found to be sufficient to generate images of acceptable visual quality.
+
+Scaling up the calibration process by including more classes or inference timesteps would have been prohibitively expensive in terms of computational time and hardware costs.
+
+\paragraph{Quantitative evaluation}
+
+To evaluate the generative quality of our quantized models against the original, we used several standard quantitative metrics, specifically \textbf{Fréchet Inception Distance (FID)}, \textbf{spatial FID (sFID)}, \textbf{Inception Score (IS)}.
+
+Additionally, we utilized \textbf{CMMD} (CLIP Maximum Mean Discrepancy) \cite{jayasumana2024rethinkingfidbetterevaluation}, a modern and highly sample-efficient metric, which provides a robust assessment of image quality.
+
+Table \ref{tab:evaluation} presents the evaluation of our DiT models with a W8A8 (8-bit weights and activations) and W4A8 (4-bit weights and 8-bit activations) configurations.
+The \textbf{model size} is reported to quantify the benefits in VRAM utilization achieved by our INT8 packing mechanism.
+\todo{Scrivere che in entrambi i casi l'higher precision è 8 bit}
 
 \begin{table}[h!]
     \caption{Evaluation comparison}
@@ -136,41 +168,19 @@ During inference, the layer performs on the fly unpacking, restoring the weights
     \begin{small}
         \begin{tabular}{c|ccccc}
             \toprule
-            &Size&FID $\downarrow$&IS $\uparrow$&sFID $\downarrow$&CMMD $\downarrow$\\
+            &Size&FID $\downarrow$&sFID $\downarrow$&IS $\uparrow$&CMMD $\downarrow$\\
             \midrule
-            FP16&1.58 GB&24.72&318 $\pm$ 7.9&59.3&0.236\\
-            W8A8&0.97 GB&24.48&322 $\pm$ 6.0&57.8&0.239\\
-            W4A8&0.78 GB&23.49&314 $\pm$ 6.7&55.7&0.236\\
-            \bottomrule
-        \end{tabular}
-    \end{small}
-\end{table}
-\todo{Cambiare ordine in FID, sFID, IS, CMMD}
-
-\begin{table}[h!]
-    \caption{Delta comparison}
-    \label{tab:delta}
-    \centering
-    \begin{small}
-        \begin{tabular}{cc|ccccc}
-            \toprule
-            &Method&$\Delta$ size&$\Delta$FID&$\Delta$IS&$\Delta$sFID\\
-            \midrule
-            \multirow{3}{*}{W8A8}&PTQ4DiT&-1.9 GB&-0.5&4.44&-2.2\\
-            &ViDiT&-75 \%&-8 \%&+1.8 \%&-11\%\\
-            &Ours&12&56&78&45\\
-            \midrule
-            \multirow{3}{*}{W4A8}&PTQ4DiT&25&45&67&17\\
-            &ViDiT&89&56&13&34\\
-            &Ours&12&56&78&45\\
+            FP16&1.58 GB&24.72&59.3&318 $\pm$ 7.9&\textbf{0.236}\\
+            W8A8&0.97 GB&24.48&57.8&\textbf{322 $\pm$ 6.0}&0.239\\
+            W4A8&0.78 GB&\textbf{23.49}&\textbf{55.7}&314 $\pm$ 6.7&\textbf{0.236}\\
             \bottomrule
         \end{tabular}
     \end{small}
 \end{table}
 
-
-Si può vedere un esempio delle differenze per un'immagine nella figura \ref{fig:image_comparison}.
-
+Our quantization framework achieves significant memory reductions while fully preserving generative quality. Moving from the FP16 baseline to W8A8 reduces the model size by roughly 38\%, and the W4A8 configuration effectively halves it.
+We observe a numerical improvement in the FID and sFID scores for the quantized models, this behavior is a known artifact of how these metrics measure distribution distances, as they can sometimes reward the slight smoothing effect introduced by quantization.
+For a more reliable assessment of generative fidelity, we look at the CMMD metric which remains stable across all models, demonstrating that quantization preserves the visual integrity as shown in Figure \ref{fig:image_comparison}.
 
 \begin{figure}[t]
     \centering
@@ -220,11 +230,40 @@ There is no strict length limit for this section, but in most cases one column o
 
 \section*{Appendix}
 
-\paragraph{Adaptive Layer Normalization (AdaLN)}
-
 \paragraph{Sensitivity analysis}
 
+\[NSR_{l} = 10^{\frac{-SNR_{l}}{10}}\]
+
+\[Score_{l} = NSR_{l}\cdot \left(1+\lambda\cdot \frac{magnitude_{l}}{\max_{k} magnitude_{k}}\right)\]
+
 \paragraph{Simulation parameters}
+
+\begin{table}[h!]
+    \caption{Hyperparameters}
+    \centering
+    \begin{small}
+        \begin{tabular}{c|c}
+            \toprule
+            Configuration&Setting\\
+            \midrule
+            Epoch& 30\\
+            Classes& 20\\
+            Inference timesteps& 20\\
+            Batch size& 4\\
+            \midrule
+            Layer shallow& 3\\
+            Layer deep& 2\\
+            Window size& 2\\
+            Window step& 1\\
+            \midrule
+            $\gamma$& 0.5\\
+            Rank of LoRA& 16\\
+            Quantization group size& 128\\
+            \bottomrule
+        \end{tabular}
+    \end{small}
+\end{table}
+
 
 \paragraph{Final weights formula}
 \[W = W \cdot \alpha + A \times B\]

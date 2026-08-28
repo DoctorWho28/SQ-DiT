@@ -21,9 +21,6 @@ def apply_fake_quantization_to_module(module: nn.Module, bits: int, group_size: 
     def replace_linears(m, prefix=""):
         for name, child in m.named_children():
             full_name = f"{prefix}.{name}" if prefix else name
-            
-            if any(skip in name for skip in SKIP_NAMES):
-                continue
                 
             if isinstance(child, nn.Linear):
                 original_linears[full_name] = child
