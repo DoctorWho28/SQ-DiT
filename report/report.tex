@@ -9,7 +9,6 @@
 
 \usepackage[accepted]{dlaiml2026}
 
-\usepackage{todonotes}[inline]
 \usepackage{xurl}
 
 \dlaititlerunning{SQ-DiT: SliderQuant for Diffusion Models}
@@ -56,7 +55,7 @@ SliderQuant exploits the fact that different layers in deep networks have differ
 SQ-DiT aims to adapt the core concepts of SliderQuant to Diffusion Transformers.
 The main difference is that SliderQuant calibrates LLMs over sequential tokens, whereas DiTs require optimizing across the temporal diffusion process.
 During the optimization process, the weights are quantized using fake quantization and only upon completion the final weights are packed into INT8 using our custom packing implementation to effectively save VRAM space.
-\todo{Aggiungere la specificazione sui modelli ImageNet-1k class-to-image e scrivere del modello \href{https://huggingface.co/facebook/DiT-XL-2-256}{facebook/DiT-XL-2-256}}
+All experiments were conducted using the \href{https://huggingface.co/facebook/DiT-XL-2-256}{facebook/DiT-XL-2-256} model, performing class-to-image generation at $256 \times 256$ resolution on the standard ImageNet-1k dataset.
 
 
 \section{Related works}\label{sec:related}
@@ -64,8 +63,6 @@ During the optimization process, the weights are quantized using fake quantizati
 SQ-DiT derives from SliderQuant \cite{wang2026sliderquantaccurateposttrainingquantization} adapting the quantization and distillation concepts to the DiT architecture.
 
 PTQ4DiT \cite{wu2024ptq4ditposttrainingquantizationdiffusion} and Q-DiT \cite{chen2024qditaccurateposttrainingquantization} serve as our primary foundational references for the state of the art in PTQ for DiTs.
-
-\todo{Possibile escursus sui paper usati per confrontare i risultati}
 
 
 \section{Method}\label{sec:quant}
@@ -83,16 +80,14 @@ To mitigate the impact of extreme weight values, we apply group-wise quantizatio
 
 
 \subsection{SQ-DiT implementation}
-Because the original SliderQuant framework cannot be easily transposed, we developed the entire quantization framework from scratch.
-\todo{Scrivere della creazione della classe SliderQuantLinear e della funzione \texttt{forward()}}
+Because the original SliderQuant framework cannot be easily transposed, we developed the entire quantization framework from scratch, implementing our custom linear modules that internally encapsulate the learnable quantization parameters.
+Furthermore, to ensure numerical stability during the quantization process, the forward pass casts both the input activations and the weights, originally loaded in FP16, into FP32 before applying the scaling and fake quantization operations.
 
 
 \paragraph{Timestep-Aware Window Distillation.}
 
 We group transformer blocks into sliding windows and optimize them sequentially.
 For each window, we optimize the quantization parameters by minimizing the Mean Squared Error (MSE) between the output features of the quantized blocks with their original unquantized counterparts.
-SliderQuant uses the $L^2$ norm instead of the MSE.
-\todo{Capire se scrivere meglio questa differenza o scriverla sopra direttamente}
 
 Unlike LLMs, where the input passes through each block only once, in DiT models the image is gradually denoised across multiple timesteps, passing through all the blocks at each step.
 
@@ -103,17 +98,15 @@ We provide the first block with the latents pre-calculated by the original FP16 
 By eliminating temporal propagation, we align the optimization with the SliderQuant paradigm used for LLMs, that don't have noise accumulation between timesteps.
 This allows the LoRA matrices within each window to focus exclusively on compensating for spatial errors propagated by preceding quantized layers.
 
-\todo{vedere se specificare che vengono fatte anche diverse classe congiuntamente}
-
 \paragraph{Mixed-Precision Architecture.}
 
 Following the original observation that network layers exhibit varying sensitivities to quantization, we decided to augment the SliderQuant approach by applying a mixed-precision policy.
 Deep and shallow transformer blocks are highly sensitive and are therefore quantized to higher bit-widths (INT8 in our case) while intermediate layers, which are more robust to quantization noise, can be quantized to a lower bit-widths.
 
 Other than that, crucial modules responsible for condition injection require special treatment. 
-The initial \texttt{emb} module, which maps discrete time and class conditions into a continuous embedding space, is kept in FP16.
+The initial \textbf{Embedding} module, which maps discrete time and class conditions into a continuous embedding space, is kept in FP16.
 Since this conditioning guides the entire generative process, any error introduced here would cascade through all subsequent layers and degrade the feature representations.
-Similarly, the AdaLN (\texttt{norm1}) module, responsible for injecting temporal and class features to the network, is quantized to higher precision. Aggressively quantizing this layer would cause the network to lose temporal awareness and class concepts, leading to generation failures.
+Similarly, the \textbf{AdaLN} module, responsible for injecting temporal and class features to the network, is quantized to higher precision. Aggressively quantizing this layer would cause the network to lose temporal awareness and class concepts, leading to generation failures.
 
 Using this mixed-precision approach has a slight impact on VRAM utilization, but this is negligible compared to the benefits on generation stability.
 
@@ -121,7 +114,6 @@ Using this mixed-precision approach has a slight impact on VRAM utilization, but
 
 To effectively have an impact on the model size and VRAM utilization we implemented a custom \texttt{WXAXLinear} module as a replacement for standard linear layers.
 This module physically packs low-bit quantized weights into \texttt{INT8} using bitwise shift and masking operations.
-\todo{Spiegare come vengono fatti gli shift per INT4 e INT2}
 
 When loading the model to generate an image, we replace the original linear layers with their \texttt{WXAXLinear} counterparts and load the packed weights into memory.
 During inference, the layer performs on the fly unpacking, restoring the weights to FP16 dynamically to continue the image generation process.
@@ -132,8 +124,7 @@ During inference, the layer performs on the fly unpacking, restoring the weights
 
 \paragraph{Sensitivity Analysis}
 
-Following the principle introduced by SliderQuant, we conducted a sensitivity analysis to determine the optimal number of deep and shallow layers for DiTs.
-\todo{Da riscrivere meglio}
+Following the principle introduced by SliderQuant, we conducted a sensitivity analysis to determine the optimal configuration of high-precision boundary layers for DiTs.
 Our sensitivity evaluation methodology is inspired by the Sensitivity-Aware Mixed Precision Quantization \cite{sensitivityanalysis} for LLMs, which estimates layer sensitivity by quantizing a single layer at a time, while keeping the rest of the network in FP16.
 In the original approach, divergence is measured using the Jensen-Shannon Divergence (JSD) between output probability distributions. However, since DiTs output continuous values rather than probabilities, JSD is inapplicable.
 We replaced it with the linear inverse of the Signal-to-Noise Ratio (SNR) \cite{roux2018sdrhalfbakeddone} to evaluate the continuous error.
@@ -142,7 +133,8 @@ We replaced it with the linear inverse of the Signal-to-Noise Ratio (SNR) \cite{
 \paragraph{Optimization Parameters}
 
 The training was done using a \textit{GPU Nvidia RTX 4090} and based on its computational capabilities we selected the hyperparameters to balance the computational time required and the quantization quality.
-\todo{Scrivere che abbiamo modificato il codice per farlo runnare durante i test per la gpu molto potente}
+To fully exploit the GPU computing power and accelerate the distillation process, we implemented a batch-stacking mechanism where inputs across all timesteps are concatenated along the batch dimension.
+This allows the model to compute the forward pass and the MSE loss for all timesteps simultaneously within a single GPU operation.
 
 
 The optimization was conducted for \textbf{30 epochs} per quantization stage (60 in total), which proved sufficient for the learnable parameters to converge and effectively compensate for the quantization noise, avoiding overfitting.
@@ -158,8 +150,8 @@ To evaluate the generative quality of our quantized models against the original,
 Additionally, we utilized \textbf{CMMD} (CLIP Maximum Mean Discrepancy) \cite{jayasumana2024rethinkingfidbetterevaluation}, a modern and highly sample-efficient metric, which provides a robust assessment of image quality.
 
 Table \ref{tab:evaluation} presents the evaluation of our DiT models with a W8A8 (8-bit weights and activations) and W4A8 (4-bit weights and 8-bit activations) configurations.
+In both configurations, the higher-precision layers in our mixed-precision policy are in 8-bit.
 The \textbf{model size} is reported to quantify the benefits in VRAM utilization achieved by our INT8 packing mechanism.
-\todo{Scrivere che in entrambi i casi l'higher precision è 8 bit}
 
 \begin{table}[h!]
     \caption{Evaluation comparison}
@@ -186,57 +178,76 @@ For a more reliable assessment of generative fidelity, we look at the CMMD metri
     \centering
     \begin{minipage}[b]{0.32\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{images/fp16_image.png}
+        \includegraphics[width=\linewidth]{images/fp16_image_dog.png}
+        \\[1.5mm]
+        \includegraphics[width=\linewidth]{images/fp16_image_food.png}
         \centerline{\small (a) Original}
     \end{minipage}
     \hfill
     \begin{minipage}[b]{0.32\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{images/w8a8_image.png}
+        \includegraphics[width=\linewidth]{images/w8a8_image_dog.png}
+        \\[1.5mm]
+        \includegraphics[width=\linewidth]{images/w8a8_image_food.png}
         \centerline{\small (b) W8A8}
     \end{minipage}
     \hfill
     \begin{minipage}[b]{0.32\linewidth}
         \centering
-        \includegraphics[width=\linewidth]{images/w4a8_image.png}
+        \includegraphics[width=\linewidth]{images/w4a8_image_dog.png}
+        \\[1.5mm]
+        \includegraphics[width=\linewidth]{images/w4a8_image_food.png}
         \centerline{\small (c) W4A8}
     \end{minipage}
-    \caption{Visual comparison of generated samples}
+    \caption{Visual comparison of generated samples with 2 different classes}
     \label{fig:image_comparison}
 \end{figure}
 
 
 \section{Conclusions}\label{sec:conc}
 
+In this project, we introduced SQ-DiT, an adaptation of the SliderQuant post-training quantization framework, specifically designed for Diffusion Transformers.
+By addressing the temporal and architectural characteristics of DiTs, we successfully implemented a timestep-aware window distillation approach combined with a mixed-precision quantization policy.
+Furthermore, our custom weight-packing module ensures tangible reductions in model size and VRAM utilization. The results highlight the effectiveness of our framework in making diffusion models more computationally efficient without compromising on visual quality.
 
-
-
+Future work could include comparing SQ-DiT with other quantization methodologies, with a wider range of quantization configurations, as well as applying the approach to higher-resolution diffusion models (for example, $512 \times 512$).
 
 \cleardoublepage
 \section*{Statement on the use of AI}\label{sec:ai}
-%
-Students must include a brief statement describing whether AI tools were used in the project and, if so, how they were used. This declaration is required for transparency, but it is not intended to penalize the use of AI in any way. A project may receive any grade in the full $0 - 31$ range regardless of whether AI tools were used extensively, minimally, or not at all.
 
-The statement should clearly indicate the role of AI in the project. Examples include, but are not limited to: rephrasing or editing parts of the report, assisting with code writing, implementing core algorithms, preparing experiment scripts, debugging, data processing, literature exploration, or generating plots and other supporting material. Students are expected to be honest and sufficiently specific.
+AI was used for literature exploration, mainly to understand the state of the art related to diffusion transformers.
 
-The responsibility for the submitted work always remains with the student(s). In particular, students must fully understand, verify, and be able to explain any material produced with the help of AI tools.
+For the code, AI was used to identify the most suitable libraries and functions to use, as well as to implement scripts to support the project (such as image generation and metric calculation). In these cases, AI provided the basic structure of the code, which we then adapted to work for our framework. It also assisted us in analysing and resolving technical issues, such as optimising the batch-stacking mechanism to make the most of the RTX 4090 GPU.
 
-\textbf{Misuse of AI will be penalized.} Examples include submitting AI-generated material that the student does not understand, cannot justify, or cannot explain if required to do so; presenting AI-produced text, code, experimental results, or claims as if they had been independently developed or verified when this is not the case; or providing inaccurate or misleading declarations about the actual use of AI in the project.
+In the report, we used it to rephrase sentences and create formulas and tables using existing data.
 
-There is no strict length limit for this section, but in most cases one column or less should be sufficient.
 
 \bibliography{references.bib}
 \bibliographystyle{dlaiml2026}
 
+\newpage
 \section*{Appendix}
 
-\paragraph{Sensitivity analysis}
+\paragraph{Final weights formula}
 
-\[NSR_{l} = 10^{\frac{-SNR_{l}}{10}}\]
+After the optimization, the final quantized weight $\tilde W$ are calculated using the learnable parameters as follows:
+\[\tilde W = W \cdot \alpha + A \times B\]
 
-\[Score_{l} = NSR_{l}\cdot \left(1+\lambda\cdot \frac{magnitude_{l}}{\max_{k} magnitude_{k}}\right)\]
 
-\paragraph{Simulation parameters}
+\paragraph{Sensitivity analysis formulas}
+
+The linear inverse of the SNR metric is detailed by the formula:
+\[\text{NSR} = 10^{\left(\dfrac{-\text{SNR}}{10}\right)}\]
+
+The sensitivity score of each layer $l$ is then defined by:
+\[\text{Score}_{l} = \text{NSR}_{l}\cdot \left(1+\lambda\cdot \frac{\text{magnitude}_{l}}{\max_{k} \text{magnitude}_{k}}\right)\]
+
+In our case, we set $\lambda=0.1$.
+
+
+\paragraph{Quantization hyperparameters}
+
+The list of the hyperparameters used in our experiments are listed below:
 
 \begin{table}[h!]
     \caption{Hyperparameters}
@@ -264,9 +275,7 @@ There is no strict length limit for this section, but in most cases one column o
     \end{small}
 \end{table}
 
-
-\paragraph{Final weights formula}
-\[W = W \cdot \alpha + A \times B\]
+The parameters are equal for both W8A8 and W4A8 configurations.
 
 \end{document}
 
